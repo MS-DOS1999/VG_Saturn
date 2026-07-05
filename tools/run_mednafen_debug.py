@@ -93,6 +93,8 @@ def main() -> int:
     common_args = [
         "-force_module",
         "ss",
+        "-ss.cart",
+        "extram4",
         "-ss.midi",
         "stdout",
         "-sound",

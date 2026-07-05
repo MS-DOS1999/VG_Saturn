@@ -98,9 +98,23 @@ vg_saturn_debug_stage(uint32_t id, const char *name)
     char *out = buffer;
     char *end = buffer + sizeof(buffer) - 1;
 
-    out = append_text(out, end, "[STAGE] id=");
+    out = append_text(out, end, "[CHECKPOINT] id=");
     out = append_u32(out, end, id);
     out = append_text(out, end, " name=");
+    out = append_text(out, end, name);
+    out = append_char(out, end, '\n');
+    *out = '\0';
+    vg_saturn_debug_puts(buffer);
+}
+
+extern "C" void
+vg_saturn_debug_pass(const char *name)
+{
+    char buffer[128];
+    char *out = buffer;
+    char *end = buffer + sizeof(buffer) - 1;
+
+    out = append_text(out, end, "[PASS] ");
     out = append_text(out, end, name);
     out = append_char(out, end, '\n');
     *out = '\0';

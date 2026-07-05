@@ -3,6 +3,7 @@ import argparse
 import math
 import shutil
 import struct
+import zlib
 from pathlib import Path
 
 try:
@@ -301,6 +302,99 @@ def copy_data(src_file, src_root, out_root):
     shutil.copy2(src_file, dst_file)
 
 
+def iso83_name(name):
+    stem = Path(name).stem.upper()[:8]
+    suffix = Path(name).suffix.upper()
+    if suffix.startswith("."):
+        suffix = suffix[1:4]
+    if suffix:
+        return f"{stem}.{suffix}"
+    return stem
+
+
+def is_iso83_component(name):
+    return iso83_name(name) == name.upper()
+
+
+def rel_upper(path):
+    return "/".join(part.upper() for part in path.parts)
+
+
+def alias_name_for(rel):
+    crc = zlib.crc32(rel_upper(rel).encode("ascii", errors="ignore")) & 0x00FFFFFF
+    suffix = rel.suffix.upper()
+    if suffix.startswith("."):
+        suffix = suffix[1:4]
+    if suffix:
+        return f"A{crc:06X}.{suffix}"
+    return f"A{crc:06X}"
+
+
+def write_saturn_aliases(out_root, header_path):
+    alias_root = out_root / "sa"
+    if alias_root.exists():
+        shutil.rmtree(alias_root)
+
+    files = [
+        path for path in sorted(out_root.rglob("*"))
+        if path.is_file() and "sa" not in path.relative_to(out_root).parts
+    ]
+
+    groups = {}
+    for path in files:
+        rel = lower_relative(path.relative_to(out_root))
+        parent = rel.parent
+        key = (parent, iso83_name(rel.name))
+        groups.setdefault(key, []).append(path)
+
+    collision_paths = set()
+    for paths in groups.values():
+        if len(paths) > 1:
+            collision_paths.update(paths)
+
+    mappings = []
+    used_aliases = set()
+    for path in files:
+        rel = lower_relative(path.relative_to(out_root))
+        unsafe = path in collision_paths
+        unsafe = unsafe or any(not is_iso83_component(part) for part in rel.parts)
+        if not unsafe:
+            continue
+
+        alias_name = alias_name_for(rel)
+        while alias_name in used_aliases:
+            stem, dot, ext = alias_name.partition(".")
+            value = (int(stem[1:], 16) + 1) & 0x00FFFFFF
+            alias_name = f"A{value:06X}.{ext}" if dot else f"A{value:06X}"
+        used_aliases.add(alias_name)
+
+        alias_rel = Path("sa") / alias_name.lower()
+        alias_file = out_root / alias_rel
+        alias_file.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, alias_file)
+        mappings.append((rel_upper(rel), rel_upper(alias_rel)))
+
+    header_path.parent.mkdir(parents=True, exist_ok=True)
+    with header_path.open("w", encoding="ascii", newline="\n") as out:
+        out.write("#ifndef VG_SATURN_ASSET_ALIASES_H\n")
+        out.write("#define VG_SATURN_ASSET_ALIASES_H\n\n")
+        out.write("typedef struct SaturnAssetAlias {\n")
+        out.write("    const char *source;\n")
+        out.write("    const char *alias;\n")
+        out.write("} SaturnAssetAlias;\n\n")
+        out.write("static const SaturnAssetAlias kSaturnAssetAliases[] = {\n")
+        for source, alias in mappings:
+            out.write(f"    {{\"{source}\", \"{alias}\"}},\n")
+        out.write("};\n\n")
+        out.write(
+            "static const unsigned int kSaturnAssetAliasCount = "
+            "sizeof(kSaturnAssetAliases) / sizeof(kSaturnAssetAliases[0]);\n\n"
+        )
+        out.write("#endif\n")
+
+    return len(mappings)
+
+
 def build_assets(src_root, out_root):
     png_count = 0
     png_skipped = 0
@@ -334,9 +428,12 @@ def main():
         raise SystemExit(f"Missing source asset directory: {src_root}")
 
     png_count, png_skipped, copy_count = build_assets(src_root, out_root)
+    repo_root = Path(__file__).resolve().parents[1]
+    alias_count = write_saturn_aliases(out_root, repo_root / "source/saturn/saturn_asset_aliases.h")
     print(f"Converted PNG textures: {png_count}")
     print(f"Skipped current PNG textures: {png_skipped}")
     print(f"Copied data files: {copy_count}")
+    print(f"Generated ISO 8.3 aliases: {alias_count}")
     print(f"Output: {out_root}")
 
 

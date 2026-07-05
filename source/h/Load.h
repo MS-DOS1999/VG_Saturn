@@ -3,6 +3,8 @@
 
 //#include <windows.h>
 #include <stdio.h>			// Header File For Standard Input/Output
+#include <stdarg.h>
+#include <stdlib.h>
 #include <string.h>
 #ifdef SWITCH
 //#include <gl\gl.h>
@@ -13,6 +15,11 @@ extern SDL_Renderer* pRenderer;
 #endif
 #include "texture.h"											// Header File Containing Our Texture Structure ( NEW )
 #include "globals.h"
+#ifdef SATURN
+#include "saturn_asset_aliases.h"
+#include "saturn_debug.h"
+#include "saturn_platform.h"
+#endif
 void VG_Reset_all_anims();
 
 #ifdef DREAMCAST
@@ -72,32 +79,399 @@ static void SaturnTextureFallback(Image *image)
     image->dataSize = 0;
 }
 
-static void SaturnTexturePath(const char *filename, char *out, size_t out_size)
+static int SaturnCharLower(int c)
 {
-    size_t i = 0;
-    for (; (filename[i] != '\0') && (i + 1 < out_size); i++) {
-        char c = filename[i];
-        if ((c >= 'A') && (c <= 'Z')) {
-            c = (char)(c - 'A' + 'a');
-        }
-        out[i] = c;
+    if (c >= 'A' && c <= 'Z') {
+        return c - 'A' + 'a';
     }
-    out[i] = '\0';
+    return c;
+}
 
-    char *ext = strrchr(out, '.');
-    if ((ext != NULL) && ((size_t)(ext - out) + 5 < out_size)) {
-        strcpy(ext, ".sat");
+static bool SaturnStartsWithCI(const char *text, const char *prefix)
+{
+    while (*prefix != '\0') {
+        if (SaturnCharLower((unsigned char)*text) != SaturnCharLower((unsigned char)*prefix)) {
+            return false;
+        }
+        text++;
+        prefix++;
+    }
+    return true;
+}
+
+static bool SaturnPathContainsCI(const char *text, const char *needle)
+{
+    if (text == NULL || needle == NULL || *needle == '\0') {
+        return false;
+    }
+
+    for (const char *cursor = text; *cursor != '\0'; cursor++) {
+        const char *a = cursor;
+        const char *b = needle;
+        while (*a != '\0' && *b != '\0' &&
+               SaturnCharLower((unsigned char)*a) == SaturnCharLower((unsigned char)*b)) {
+            a++;
+            b++;
+        }
+        if (*b == '\0') {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool SaturnTexturePathSuppressed(const char *path)
+{
+    return SaturnPathContainsCI(path, "VERDICT/LOAD/") ||
+           SaturnPathContainsCI(path, "VERDICT\\LOAD\\") ||
+           SaturnPathContainsCI(path, "VERDICT/BGS/") ||
+           SaturnPathContainsCI(path, "VERDICT\\BGS\\") ||
+           SaturnPathContainsCI(path, "VERDICT/TITLE/BG") ||
+           SaturnPathContainsCI(path, "VERDICT\\TITLE\\BG") ||
+           SaturnPathContainsCI(path, "VERDICT/STORY/BG/") ||
+           SaturnPathContainsCI(path, "VERDICT\\STORY\\BG\\");
+}
+
+static void SaturnApplyCdAlias(char *path, size_t path_size)
+{
+    if (path_size == 0) {
+        return;
+    }
+    for (unsigned int i = 0; i < kSaturnAssetAliasCount; i++) {
+        if (strcmp(path, kSaturnAssetAliases[i].source) == 0) {
+            strncpy(path, kSaturnAssetAliases[i].alias, path_size - 1);
+            path[path_size - 1] = '\0';
+            return;
+        }
     }
 }
 
+static void SaturnNormalizeCdPath(const char *filename, char *out, size_t out_size)
+{
+    if (out_size == 0) {
+        return;
+    }
+
+    const char *src = filename;
+    if (SaturnStartsWithCI(src, "cd/") || SaturnStartsWithCI(src, "cd\\")) {
+        src += 3;
+    }
+
+    size_t o = 0;
+    if (SaturnStartsWithCI(src, "scene/episode") || SaturnStartsWithCI(src, "scene\\episode")) {
+        const char *digits = src + 13;
+        const char prefix[] = "SCENE/EP";
+        for (size_t i = 0; prefix[i] != '\0' && o + 1 < out_size; i++) {
+            out[o++] = prefix[i];
+        }
+        while ((*digits >= '0') && (*digits <= '9') && o + 1 < out_size) {
+            out[o++] = *digits++;
+        }
+        src = digits;
+    }
+
+    while ((*src != '\0') && (o + 1 < out_size)) {
+        char c = *src++;
+        if (c == '\\') {
+            c = '/';
+        }
+        if ((c >= 'a') && (c <= 'z')) {
+            c = (char)(c - 'a' + 'A');
+        }
+        out[o++] = c;
+    }
+    out[o] = '\0';
+    SaturnApplyCdAlias(out, out_size);
+}
+
+static void SaturnTexturePath(const char *filename, char *out, size_t out_size)
+{
+    SaturnNormalizeCdPath(filename, out, out_size);
+
+    char *ext = strrchr(out, '.');
+    if ((ext != NULL) && ((size_t)(ext - out) + 5 < out_size)) {
+        strcpy(ext, ".SAT");
+    }
+    SaturnApplyCdAlias(out, out_size);
+}
+
+
+typedef struct SaturnTextFile {
+    char *data;
+    uint32_t size;
+    uint32_t cursor;
+} SaturnTextFile;
+
+static bool SaturnTextIsSpace(int c)
+{
+    return (c == ' ') || (c == '\t') || (c == '\n') ||
+           (c == '\r') || (c == '\f') || (c == '\v');
+}
+
+static SaturnTextFile *SaturnTextOpen(const char *path, const char *mode)
+{
+    (void)mode;
+    void *data = NULL;
+    uint32_t size = 0;
+    if (!vg_saturn_cd_read_file(path, &data, &size)) {
+        return NULL;
+    }
+
+    SaturnTextFile *file = (SaturnTextFile *)malloc(sizeof(SaturnTextFile));
+    if (file == NULL) {
+        vg_saturn_cd_free_file(data);
+        return NULL;
+    }
+
+    file->data = (char *)data;
+    file->size = size;
+    file->cursor = 0;
+    return file;
+}
+
+static int SaturnTextClose(SaturnTextFile *file)
+{
+    if (file != NULL) {
+        vg_saturn_cd_free_file(file->data);
+        free(file);
+    }
+    return 0;
+}
+
+static void SaturnTextSkipSpace(SaturnTextFile *file)
+{
+    while ((file->cursor < file->size) && SaturnTextIsSpace((unsigned char)file->data[file->cursor])) {
+        file->cursor++;
+    }
+}
+
+static bool SaturnTextReadToken(SaturnTextFile *file, char *buffer, int buffer_size)
+{
+    SaturnTextSkipSpace(file);
+    if (file->cursor >= file->size) {
+        buffer[0] = '\0';
+        return false;
+    }
+
+    int count = 0;
+    while ((file->cursor < file->size) && !SaturnTextIsSpace((unsigned char)file->data[file->cursor])) {
+        if (count + 1 < buffer_size) {
+            buffer[count++] = file->data[file->cursor];
+        }
+        file->cursor++;
+    }
+    buffer[count] = '\0';
+    return count > 0;
+}
+
+static int SaturnTextParseInt(const char *token)
+{
+    int sign = 1;
+    int index = 0;
+    int base = 10;
+    int value = 0;
+
+    if (token[index] == '-') {
+        sign = -1;
+        index++;
+    } else if (token[index] == '+') {
+        index++;
+    }
+
+    if ((token[index] == '0') && ((token[index + 1] == 'x') || (token[index + 1] == 'X'))) {
+        base = 16;
+        index += 2;
+    }
+
+    for (; token[index] != '\0'; index++) {
+        int digit = -1;
+        if ((token[index] >= '0') && (token[index] <= '9')) {
+            digit = token[index] - '0';
+        } else if ((token[index] >= 'a') && (token[index] <= 'f')) {
+            digit = token[index] - 'a' + 10;
+        } else if ((token[index] >= 'A') && (token[index] <= 'F')) {
+            digit = token[index] - 'A' + 10;
+        } else {
+            break;
+        }
+        if (digit >= base) {
+            break;
+        }
+        value = (value * base) + digit;
+    }
+
+    return value * sign;
+}
+
+static double SaturnTextPow10(int exponent)
+{
+    double value = 1.0;
+    if (exponent >= 0) {
+        for (int i = 0; i < exponent; i++) {
+            value *= 10.0;
+        }
+    } else {
+        for (int i = 0; i < -exponent; i++) {
+            value *= 0.1;
+        }
+    }
+    return value;
+}
+
+static double SaturnTextParseFloat(const char *token)
+{
+    int sign = 1;
+    int index = 0;
+    double value = 0.0;
+
+    if (token[index] == '-') {
+        sign = -1;
+        index++;
+    } else if (token[index] == '+') {
+        index++;
+    }
+
+    while ((token[index] >= '0') && (token[index] <= '9')) {
+        value = (value * 10.0) + (double)(token[index] - '0');
+        index++;
+    }
+
+    if (token[index] == '.') {
+        index++;
+        double scale = 0.1;
+        while ((token[index] >= '0') && (token[index] <= '9')) {
+            value += (double)(token[index] - '0') * scale;
+            scale *= 0.1;
+            index++;
+        }
+    }
+
+    if ((token[index] == 'e') || (token[index] == 'E')) {
+        index++;
+        int exp_sign = 1;
+        if (token[index] == '-') {
+            exp_sign = -1;
+            index++;
+        } else if (token[index] == '+') {
+            index++;
+        }
+        int exp_value = 0;
+        while ((token[index] >= '0') && (token[index] <= '9')) {
+            exp_value = (exp_value * 10) + (token[index] - '0');
+            index++;
+        }
+        value *= SaturnTextPow10(exp_value * exp_sign);
+    }
+
+    return value * (double)sign;
+}
+
+static int SaturnTextScanf(SaturnTextFile *file, const char *format, ...)
+{
+    if (file == NULL) {
+        return 0;
+    }
+
+    va_list args;
+    va_start(args, format);
+
+    int assigned = 0;
+    char token[256];
+
+    for (int i = 0; format[i] != '\0'; i++) {
+        if (SaturnTextIsSpace((unsigned char)format[i])) {
+            SaturnTextSkipSpace(file);
+            continue;
+        }
+
+        if (format[i] != '%') {
+            if ((file->cursor >= file->size) || (file->data[file->cursor] != format[i])) {
+                break;
+            }
+            file->cursor++;
+            continue;
+        }
+
+        i++;
+        bool short_dest = false;
+        if (format[i] == 'h') {
+            short_dest = true;
+            i++;
+        } else if (format[i] == 'l') {
+            i++;
+        }
+
+        const char spec = format[i];
+        if (spec == '%') {
+            if ((file->cursor >= file->size) || (file->data[file->cursor] != '%')) {
+                break;
+            }
+            file->cursor++;
+            continue;
+        }
+
+        if ((spec == 'i') || (spec == 'd') || (spec == 'u')) {
+            if (!SaturnTextReadToken(file, token, sizeof(token))) {
+                break;
+            }
+            const int value = SaturnTextParseInt(token);
+            if (short_dest) {
+                short *out = va_arg(args, short *);
+                *out = (short)value;
+            } else {
+                int *out = va_arg(args, int *);
+                *out = value;
+            }
+            assigned++;
+        } else if (spec == 'f') {
+            if (!SaturnTextReadToken(file, token, sizeof(token))) {
+                break;
+            }
+            float *out = va_arg(args, float *);
+            *out = (float)SaturnTextParseFloat(token);
+            assigned++;
+        } else if (spec == 's') {
+            if (!SaturnTextReadToken(file, token, sizeof(token))) {
+                break;
+            }
+            char *out = va_arg(args, char *);
+            int j = 0;
+            while (token[j] != '\0') {
+                out[j] = token[j];
+                j++;
+            }
+            out[j] = '\0';
+            assigned++;
+        }
+    }
+
+    va_end(args);
+    return assigned;
+}
+
+#define VG_TEXT_FILE SaturnTextFile
+#define VG_TEXT_OPEN SaturnTextOpen
+#define VG_TEXT_SCAN SaturnTextScanf
+#define VG_TEXT_CLOSE SaturnTextClose
+
 static int SaturnImageLoad(char *filename, Image *image)
 {
+    const bool suppress_texture = SaturnTexturePathSuppressed(filename);
+    if (suppress_texture) {
+        char suppressed_path[256];
+        SaturnNormalizeCdPath(filename, suppressed_path, sizeof(suppressed_path));
+        glSaturnSetTextureSourcePath(suppressed_path);
+        SaturnTextureFallback(image);
+        return 1;
+    }
+
     char saturn_path[256];
     SaturnTexturePath(filename, saturn_path, sizeof(saturn_path));
     glSaturnSetTextureSourcePath(saturn_path);
 
-    FILE *file = fopen(saturn_path, "rb");
-    if (file == NULL) {
+    void *file_data = NULL;
+    uint32_t file_size = 0;
+    if (!vg_saturn_cd_read_file(saturn_path, &file_data, &file_size)) {
         printf("Saturn texture missing, fallback: %s\n", saturn_path);
         SaturnTextureFallback(image);
         return 1;
@@ -110,17 +484,24 @@ static int SaturnImageLoad(char *filename, Image *image)
         unsigned int data_size;
     } header;
 
-    if (fread(&header, sizeof(header), 1, file) != 1 ||
-        memcmp(header.magic, "VG4P", 4) != 0 ||
-        header.width == 0 || header.height == 0 ||
-        header.data_size == 0) {
-        fclose(file);
+    if (file_size < sizeof(header)) {
+        vg_saturn_cd_free_file(file_data);
         printf("Invalid Saturn texture, fallback: %s\n", saturn_path);
         SaturnTextureFallback(image);
         return 1;
     }
 
-    fclose(file);
+    memcpy(&header, file_data, sizeof(header));
+    vg_saturn_cd_free_file(file_data);
+
+    if (memcmp(header.magic, "VG4P", 4) != 0 ||
+        header.width == 0 || header.height == 0 ||
+        header.data_size == 0) {
+        printf("Invalid Saturn texture, fallback: %s\n", saturn_path);
+        SaturnTextureFallback(image);
+        return 1;
+    }
+
     image->sizeX = header.width;
     image->sizeY = header.height;
     image->data = NULL;
@@ -129,6 +510,12 @@ static int SaturnImageLoad(char *filename, Image *image)
     image->dataSize = 32 + header.data_size;
     return 1;
 }
+#endif
+#ifndef SATURN
+#define VG_TEXT_FILE FILE
+#define VG_TEXT_OPEN fopen
+#define VG_TEXT_SCAN fscanf
+#define VG_TEXT_CLOSE fclose
 #endif
 
 
@@ -1437,7 +1824,7 @@ bool SaveCFG()
 int LoadAnim( sString sfilename, int texture_id, int the_tex_id )
 {
   
-    FILE *fp;
+    VG_TEXT_FILE *fp;
     int holder_fx_id=0;
   
     strcat(sfilename.string,".dat"); 
@@ -1447,7 +1834,13 @@ int LoadAnim( sString sfilename, int texture_id, int the_tex_id )
     errno_t err;
 #endif
 
-#ifdef SWITCH
+#ifdef SATURN
+	char saturn_filename[256];
+	SaturnNormalizeCdPath(sfilename.string, saturn_filename, sizeof(saturn_filename));
+	vg_saturn_debug_stage(720, "loadanim_before_open");
+	fp = VG_TEXT_OPEN(saturn_filename, "r");
+	vg_saturn_debug_stage(721, "loadanim_after_open");
+#elif defined(SWITCH)
 	if (strstr(sfilename.string, "rom:") == NULL)
 	{
 		char tempfilename[200];
@@ -1500,13 +1893,15 @@ int LoadAnim( sString sfilename, int texture_id, int the_tex_id )
 	else
 	{
 #endif
+#ifndef SATURN
 		for (int i = 0; sfilename.string[i]; i++) {
 			sfilename.string[i] = tolower(sfilename.string[i]);
 		}
-		fp = fopen(sfilename.string, "r");
+		fp = VG_TEXT_OPEN(sfilename.string, "r");
 		//printf("LoadAnim NO CONVERSION : %s\n", sfilename.string);
 
 	}
+#endif
 
         
     if(the_tex_id==-1) 
@@ -1533,19 +1928,30 @@ int LoadAnim( sString sfilename, int texture_id, int the_tex_id )
     {   
 
 
-        fscanf(fp, "%f", &a_texture[holder_fx_id].width);                                                      
-        fscanf(fp, "%f", &a_texture[holder_fx_id].height);
+        VG_TEXT_SCAN(fp, "%f", &a_texture[holder_fx_id].width);                                                      
+        VG_TEXT_SCAN(fp, "%f", &a_texture[holder_fx_id].height);
 #ifdef DREAMCAST                                                      
-        fscanf(fp, "%hd", &a_texture[holder_fx_id].column); 
-        fscanf(fp, "%hd", &a_texture[holder_fx_id].frames);    
-        fscanf(fp, "%hd", &a_texture[holder_fx_id].no_of_anims);
-        fscanf(fp, "%hd", &a_texture[holder_fx_id].rythm);
+        VG_TEXT_SCAN(fp, "%hd", &a_texture[holder_fx_id].column); 
+        VG_TEXT_SCAN(fp, "%hd", &a_texture[holder_fx_id].frames);    
+        VG_TEXT_SCAN(fp, "%hd", &a_texture[holder_fx_id].no_of_anims);
+        VG_TEXT_SCAN(fp, "%hd", &a_texture[holder_fx_id].rythm);
         a_texture[holder_fx_id].loaded = 1;
 #else
-        fscanf(fp, "%i", &a_texture[holder_fx_id].column); 
-        fscanf(fp, "%i", &a_texture[holder_fx_id].frames);    
-        fscanf(fp, "%i", &a_texture[holder_fx_id].no_of_anims);
-        fscanf(fp, "%i", &a_texture[holder_fx_id].rythm);
+        VG_TEXT_SCAN(fp, "%i", &a_texture[holder_fx_id].column); 
+        VG_TEXT_SCAN(fp, "%i", &a_texture[holder_fx_id].frames);    
+        VG_TEXT_SCAN(fp, "%i", &a_texture[holder_fx_id].no_of_anims);
+        VG_TEXT_SCAN(fp, "%i", &a_texture[holder_fx_id].rythm);
+#endif
+#ifdef SATURN
+		if (a_texture[holder_fx_id].frames <= 0 ||
+			a_texture[holder_fx_id].frames > LIMIT_FRAMES ||
+			a_texture[holder_fx_id].no_of_anims <= 0 ||
+			a_texture[holder_fx_id].no_of_anims > LIMIT_ANIMS) {
+			VG_TEXT_CLOSE(fp);
+			vg_saturn_debug_stage(736, "loadanim_bad_header");
+			return (the_tex_id == -1) ? g_fx_id : the_tex_id;
+		}
+		vg_saturn_debug_stage(736, "loadanim_after_header");
 #endif
         //printf("w %f h %f c %d f %d\n", a_texture[holder_fx_id].width, a_texture[holder_fx_id].height, a_texture[holder_fx_id].column, a_texture[holder_fx_id].frames);
 
@@ -1554,13 +1960,27 @@ int LoadAnim( sString sfilename, int texture_id, int the_tex_id )
 
         for(int j=0;j<a_texture[holder_fx_id].no_of_anims;j++)
 		if(j >= 0 && j < 256)
-            fscanf(fp, "%hd", &a_texture[holder_fx_id].anim_frames[j] );
+            VG_TEXT_SCAN(fp, "%hd", &a_texture[holder_fx_id].anim_frames[j] );
+#ifdef SATURN
+		for(int j=0;j<a_texture[holder_fx_id].no_of_anims;j++)
+		if(j >= 0 && j < 256)
+		if(a_texture[holder_fx_id].anim_frames[j] < 0 || a_texture[holder_fx_id].anim_frames[j] > LIMIT_FRAMES)
+		{
+			VG_TEXT_CLOSE(fp);
+			vg_saturn_debug_stage(737, "loadanim_bad_frames");
+			return (the_tex_id == -1) ? g_fx_id : the_tex_id;
+		}
+		vg_saturn_debug_stage(737, "loadanim_after_frames");
+#endif
         
         a_texture[holder_fx_id].delay = (short*)malloc(sizeof(short) * a_texture[holder_fx_id].frames);
 
         for(int j=0;j<a_texture[holder_fx_id].frames;j++)
 		if(j >= 0 && j < 256)
-            fscanf(fp, "%hd", &a_texture[holder_fx_id].delay[j]);
+            VG_TEXT_SCAN(fp, "%hd", &a_texture[holder_fx_id].delay[j]);
+#ifdef SATURN
+		vg_saturn_debug_stage(738, "loadanim_after_delays");
+#endif
 
         a_texture[holder_fx_id].anims = (short**)malloc(sizeof(short*) * a_texture[holder_fx_id].no_of_anims);
 
@@ -1573,29 +1993,35 @@ int LoadAnim( sString sfilename, int texture_id, int the_tex_id )
         	for(int i=0;i<a_texture[holder_fx_id].anim_frames[j];i++)
 			if(i >= 0 && i < 256)
 			if(j >= 0 && j < 256)
-            	fscanf(fp, "%hd", &a_texture[holder_fx_id].anims[j][i]);
+            	VG_TEXT_SCAN(fp, "%hd", &a_texture[holder_fx_id].anims[j][i]);
     	}
+#ifdef SATURN
+		vg_saturn_debug_stage(739, "loadanim_after_table");
+#endif
 
 #else
 
         for(int j=0;j<a_texture[holder_fx_id].no_of_anims;j++)
 		if(j >= 0 && j < 256)
-            fscanf(fp, "%i", &a_texture[holder_fx_id].anim_frames[j] );
+            VG_TEXT_SCAN(fp, "%i", &a_texture[holder_fx_id].anim_frames[j] );
 
         for(int j=0;j<a_texture[holder_fx_id].frames;j++)
 		if(j >= 0 && j < 256)
-            fscanf(fp, "%i", &a_texture[holder_fx_id].delay[j]);
+            VG_TEXT_SCAN(fp, "%i", &a_texture[holder_fx_id].delay[j]);
 
         for(int j=0;j<a_texture[holder_fx_id].no_of_anims;j++)
         {
         	for(int i=0;i<a_texture[holder_fx_id].anim_frames[j];i++)
 			if(i >= 0 && i < 256)
 			if(j >= 0 && j < 256)
-            	fscanf(fp, "%i", &a_texture[holder_fx_id].anims[j][i]);
+            	VG_TEXT_SCAN(fp, "%i", &a_texture[holder_fx_id].anims[j][i]);
     	}
 #endif
        
-        fclose(fp);   
+        VG_TEXT_CLOSE(fp);   
+#ifdef SATURN
+		vg_saturn_debug_stage(740, "loadanim_after_close");
+#endif
                                   
     } 
     
@@ -1712,7 +2138,7 @@ bool Dump_BG( char *filename )
 bool LoadPoints( sString sfilename )
 {
     bool success=false; 
-    FILE *fp;
+    VG_TEXT_FILE *fp;
    
     strcat(sfilename.string,".pt"); 
    
@@ -1722,7 +2148,13 @@ bool LoadPoints( sString sfilename )
 #endif
 
 
-#ifdef SWITCH
+#ifdef SATURN
+	char saturn_filename[256];
+	SaturnNormalizeCdPath(sfilename.string, saturn_filename, sizeof(saturn_filename));
+	vg_saturn_debug_stage(714, "loadpoints_before_fopen");
+	fp = VG_TEXT_OPEN(saturn_filename, "r");
+	vg_saturn_debug_stage(715, "loadpoints_after_fopen");
+#elif defined(SWITCH)
 	if (strstr(sfilename.string, "rom:") == NULL)
 	{
 		char tempfilename[200];
@@ -1775,6 +2207,7 @@ bool LoadPoints( sString sfilename )
 	else
 	{
 #endif
+#ifndef SATURN
 		for (int i = 0; sfilename.string[i]; i++) {
 			sfilename.string[i] = tolower(sfilename.string[i]);
 		}
@@ -1782,6 +2215,7 @@ bool LoadPoints( sString sfilename )
 		//printf("LoadPoints NO CONVERSION : %s\n", sfilename.string);
 
 	}
+#endif
 
 	//fp = fopen( sfilename.string, "r");
 
@@ -1800,26 +2234,26 @@ bool LoadPoints( sString sfilename )
 		          
 	    memset( points, 0, sizeof(a_point)*TOTAL_NO_POINTS ); 
 
-        fscanf(fp, "%i", &no_points);                                                      
+        VG_TEXT_SCAN(fp, "%i", &no_points);                                                      
         
         for( int i=0; i<no_points;i++)
 		if(i >= 0 && i < TOTAL_NO_POINTS)
         {
-	        fscanf(fp,"%f", &points[i].x);
-	        fscanf(fp,"%f", &points[i].y);
-	        fscanf(fp,"%i", &points[i].anim_state);
-	        fscanf(fp,"%i", &points[i].anim);
-	        fscanf(fp,"%i", &points[i].active);
-	        fscanf(fp,"%f", &points[i].speed);
-	        fscanf(fp,"%i", &points[i].score);
-	        fscanf(fp,"%i", &points[i].c1);	        
-	        fscanf(fp,"%i", &points[i].c2);	        
-	        fscanf(fp,"%i", &points[i].c3);	        
-	        fscanf(fp,"%i", &points[i].c4);	
+	        VG_TEXT_SCAN(fp,"%f", &points[i].x);
+	        VG_TEXT_SCAN(fp,"%f", &points[i].y);
+	        VG_TEXT_SCAN(fp,"%i", &points[i].anim_state);
+	        VG_TEXT_SCAN(fp,"%i", &points[i].anim);
+	        VG_TEXT_SCAN(fp,"%i", &points[i].active);
+	        VG_TEXT_SCAN(fp,"%f", &points[i].speed);
+	        VG_TEXT_SCAN(fp,"%i", &points[i].score);
+	        VG_TEXT_SCAN(fp,"%i", &points[i].c1);	        
+	        VG_TEXT_SCAN(fp,"%i", &points[i].c2);	        
+	        VG_TEXT_SCAN(fp,"%i", &points[i].c3);	        
+	        VG_TEXT_SCAN(fp,"%i", &points[i].c4);	
             
             points[i].active = 0;        
         } 
-        fclose(fp);
+        VG_TEXT_CLOSE(fp);
                       
     }      
     
@@ -1891,7 +2325,7 @@ bool DumpPoints( char *filename )
 
 bool LoadNodes( sString sfilename )
 {
-    FILE *fp; 
+    VG_TEXT_FILE *fp; 
    
     strcat(sfilename.string,".nde"); 
    
@@ -1902,7 +2336,13 @@ bool LoadNodes( sString sfilename )
 
 	//fp = fopen( sfilename.string, "r");
 
-#ifdef SWITCH
+#ifdef SATURN
+	char saturn_filename[256];
+	SaturnNormalizeCdPath(sfilename.string, saturn_filename, sizeof(saturn_filename));
+	vg_saturn_debug_stage(716, "loadnodes_before_fopen");
+	fp = VG_TEXT_OPEN(saturn_filename, "r");
+	vg_saturn_debug_stage(717, "loadnodes_after_fopen");
+#elif defined(SWITCH)
 	if (strstr(sfilename.string, "rom:") == NULL)
 	{
 		char tempfilename[200];
@@ -1955,6 +2395,7 @@ bool LoadNodes( sString sfilename )
 	else
 	{
 #endif
+#ifndef SATURN
 		for (int i = 0; sfilename.string[i]; i++) {
 			sfilename.string[i] = tolower(sfilename.string[i]);
 		}
@@ -1962,6 +2403,7 @@ bool LoadNodes( sString sfilename )
 		//printf("NODE NO CONVERSION : %s\n", sfilename.string);
 
 	}
+#endif
 
 
     //if (err!=NULL)
@@ -1979,12 +2421,12 @@ bool LoadNodes( sString sfilename )
 		          
 		memset( nodes, 0, sizeof(a_point)*TOTAL_NO_NODES );
 
-        fscanf(fp, "%i", &no_nodes);
+        VG_TEXT_SCAN(fp, "%i", &no_nodes);
 
 #if defined (PS4) || defined (XB1)
 		if (no_nodes == 0)
 		{
-			fclose(fp);
+			VG_TEXT_CLOSE(fp);
 			return true;
 		}
 #endif
@@ -1992,20 +2434,20 @@ bool LoadNodes( sString sfilename )
         for( int i=0; i<no_nodes;i++) 
 		if(i >= 0 && i < TOTAL_NO_NODES)
         {
-	        fscanf(fp,"%f", &nodes[i].x);
-	        fscanf(fp,"%f", &nodes[i].y);
-	        fscanf(fp,"%i", &nodes[i].anim_state);
-	        fscanf(fp,"%i", &nodes[i].anim);
-	        fscanf(fp,"%i", &nodes[i].active);
-	        fscanf(fp,"%f", &nodes[i].speed);
-	        fscanf(fp,"%i", &nodes[i].score);
-	        fscanf(fp,"%i", &nodes[i].c1);	        
-	        fscanf(fp,"%i", &nodes[i].c2);	        
-	        fscanf(fp,"%i", &nodes[i].c3);	        
-	        fscanf(fp,"%i", &nodes[i].c4);	        
+	        VG_TEXT_SCAN(fp,"%f", &nodes[i].x);
+	        VG_TEXT_SCAN(fp,"%f", &nodes[i].y);
+	        VG_TEXT_SCAN(fp,"%i", &nodes[i].anim_state);
+	        VG_TEXT_SCAN(fp,"%i", &nodes[i].anim);
+	        VG_TEXT_SCAN(fp,"%i", &nodes[i].active);
+	        VG_TEXT_SCAN(fp,"%f", &nodes[i].speed);
+	        VG_TEXT_SCAN(fp,"%i", &nodes[i].score);
+	        VG_TEXT_SCAN(fp,"%i", &nodes[i].c1);	        
+	        VG_TEXT_SCAN(fp,"%i", &nodes[i].c2);	        
+	        VG_TEXT_SCAN(fp,"%i", &nodes[i].c3);	        
+	        VG_TEXT_SCAN(fp,"%i", &nodes[i].c4);	        
         } 
 
-        fclose(fp);
+        VG_TEXT_CLOSE(fp);
                       
     }      
  
@@ -2079,7 +2521,7 @@ bool DumpNodes( char *filename )
 
 bool LoadHud( char *filename )
 {
-    FILE *fp;
+    VG_TEXT_FILE *fp;
     int hud_blank=0; // Not used at moment
 	int temp_grab_switch=0;
 	int temp_mouseover=0;
@@ -2089,7 +2531,13 @@ bool LoadHud( char *filename )
     errno_t err; 
 #endif
 
-#ifdef SWITCH
+#ifdef SATURN
+	char saturn_filename[256];
+	SaturnNormalizeCdPath(filename, saturn_filename, sizeof(saturn_filename));
+	vg_saturn_debug_stage(718, "loadhud_before_open");
+	fp = VG_TEXT_OPEN(saturn_filename, "r");
+	vg_saturn_debug_stage(719, "loadhud_after_open");
+#elif defined(SWITCH)
 	if (strstr(filename, "rom:") == NULL)
 	{
 		char tempfilename[200];
@@ -2142,13 +2590,15 @@ bool LoadHud( char *filename )
 	else
 	{
 #endif
+#ifndef SATURN
 		for (int i = 0; filename[i]; i++) {
 			filename[i] = tolower(filename[i]);
 		}
-		fp = fopen(filename, "r");
+		fp = VG_TEXT_OPEN(filename, "r");
 		//printf("HUD NO CONVERSION : %s\n", filename);
 
 	}
+#endif
 
 
 	//fp  = fopen( filename, "r");
@@ -2165,60 +2615,60 @@ bool LoadHud( char *filename )
 	if (fp != NULL)
 #endif
     {   
-        fscanf(fp, "%i", &hud_blank);                                                      
-        fscanf(fp, "%i", &hud_no_sprites);
-        fscanf(fp, "%i", &hud_blank);
-        fscanf(fp, "%i", &hud_blank);
-        fscanf(fp, "%i", &hud_blank);
-        fscanf(fp, "%i", &hud_blank);
-        fscanf(fp, "%i", &hud_blank);
-        fscanf(fp, "%i", &hud_blank);
-        fscanf(fp, "%i", &hud_blank);
+        VG_TEXT_SCAN(fp, "%i", &hud_blank);                                                      
+        VG_TEXT_SCAN(fp, "%i", &hud_no_sprites);
+        VG_TEXT_SCAN(fp, "%i", &hud_blank);
+        VG_TEXT_SCAN(fp, "%i", &hud_blank);
+        VG_TEXT_SCAN(fp, "%i", &hud_blank);
+        VG_TEXT_SCAN(fp, "%i", &hud_blank);
+        VG_TEXT_SCAN(fp, "%i", &hud_blank);
+        VG_TEXT_SCAN(fp, "%i", &hud_blank);
+        VG_TEXT_SCAN(fp, "%i", &hud_blank);
                           
         for( int i=0; i<hud_no_sprites;i++)
 		if(i >= 0 && i < TOTAL_NO_HUD)
         {
-	        fscanf(fp,"%f", &hud[i].x);
-	        fscanf(fp,"%f", &hud[i].y);
+	        VG_TEXT_SCAN(fp,"%f", &hud[i].x);
+	        VG_TEXT_SCAN(fp,"%f", &hud[i].y);
             
-	        fscanf(fp,"%f", &hud[i].width);
-	        fscanf(fp,"%f", &hud[i].height);
+	        VG_TEXT_SCAN(fp,"%f", &hud[i].width);
+	        VG_TEXT_SCAN(fp,"%f", &hud[i].height);
 	        
-	        fscanf(fp,"%f", &hud[i].w);
-	        fscanf(fp,"%f", &hud[i].z);
+	        VG_TEXT_SCAN(fp,"%f", &hud[i].w);
+	        VG_TEXT_SCAN(fp,"%f", &hud[i].z);
             
-	        fscanf(fp,"%f", &hud[i].box_width);
-	        fscanf(fp,"%f", &hud[i].box_height);
+	        VG_TEXT_SCAN(fp,"%f", &hud[i].box_width);
+	        VG_TEXT_SCAN(fp,"%f", &hud[i].box_height);
              	        
 	        for ( int j=0;j<4;j++)
 	        {
-	            fscanf(fp,"%f", &hud[i].u[j]);
-	            fscanf(fp,"%f", &hud[i].v[j]);
+	            VG_TEXT_SCAN(fp,"%f", &hud[i].u[j]);
+	            VG_TEXT_SCAN(fp,"%f", &hud[i].v[j]);
             } 
 
-	        fscanf(fp,"%i", &hud[i].id);
+	        VG_TEXT_SCAN(fp,"%i", &hud[i].id);
 
 			if( hud[i].id >= 0 && hud[i].id < 200)
 	        if( texture_fx[hud[i].id] == 2 || texture_fx[hud[i].id] == 3 || texture_fx[hud[i].id] == 4)
 	           hud[i].fx_id = animation_fx[hud[i].id];
 	           
-	        fscanf(fp,"%i", &hud_blank);
-            fscanf(fp,"%i", &hud[i].anim_state);
-            fscanf(fp,"%i", &hud[i].anim); 
-            fscanf(fp,"%f", &hud[i].alpha);
-            fscanf(fp,"%i", &hud[i].linked_sprite); 
-   	        fscanf(fp,"%i", &hud[i].priority);
-	        fscanf(fp,"%i", &hud[i].type);
-	        fscanf(fp,"%i", &temp_grab_switch); // Bool
-	        fscanf(fp,"%i", &temp_mouseover);   // Bool 
-	        fscanf(fp,"%i", &hud[i].sector);
-	        fscanf(fp,"%i", &hud[i].sector_action);
-	        fscanf(fp,"%i", &hud[i].onCreate);
-	        fscanf(fp,"%i", &hud[i].onCreate_action);
-	        fscanf(fp,"%i", &hud[i].rank);
-	        fscanf(fp,"%i", &hud[i].onDeath_action);
-	        fscanf(fp,"%f", &hud[i].light); 
-		    fscanf(fp,"%i", &hud[i].global_flag); 
+	        VG_TEXT_SCAN(fp,"%i", &hud_blank);
+            VG_TEXT_SCAN(fp,"%i", &hud[i].anim_state);
+            VG_TEXT_SCAN(fp,"%i", &hud[i].anim); 
+            VG_TEXT_SCAN(fp,"%f", &hud[i].alpha);
+            VG_TEXT_SCAN(fp,"%i", &hud[i].linked_sprite); 
+   	        VG_TEXT_SCAN(fp,"%i", &hud[i].priority);
+	        VG_TEXT_SCAN(fp,"%i", &hud[i].type);
+	        VG_TEXT_SCAN(fp,"%i", &temp_grab_switch); // Bool
+	        VG_TEXT_SCAN(fp,"%i", &temp_mouseover);   // Bool 
+	        VG_TEXT_SCAN(fp,"%i", &hud[i].sector);
+	        VG_TEXT_SCAN(fp,"%i", &hud[i].sector_action);
+	        VG_TEXT_SCAN(fp,"%i", &hud[i].onCreate);
+	        VG_TEXT_SCAN(fp,"%i", &hud[i].onCreate_action);
+	        VG_TEXT_SCAN(fp,"%i", &hud[i].rank);
+	        VG_TEXT_SCAN(fp,"%i", &hud[i].onDeath_action);
+	        VG_TEXT_SCAN(fp,"%f", &hud[i].light); 
+		    VG_TEXT_SCAN(fp,"%i", &hud[i].global_flag); 
 
 			SAFE_INT2BOOL(temp_grab_switch, hud[i].grab_switch);
 			SAFE_INT2BOOL(temp_mouseover, hud[i].mouseover);
@@ -2242,7 +2692,7 @@ bool LoadHud( char *filename )
              	        
         }  
 
-        fclose(fp);
+        VG_TEXT_CLOSE(fp);
                 
     }   
     
@@ -2277,7 +2727,7 @@ bool LoadScene( int episode1, int scene1, bool delete_textures )
 
 	}
 #endif
-    FILE *fp;
+    VG_TEXT_FILE *fp;
 #ifndef DREAMCAST
 	errno_t err; 
 #endif
@@ -2747,32 +3197,60 @@ bool LoadScene( int episode1, int scene1, bool delete_textures )
 
     sprintf( temp_string.string, "scene/episode%i/scene%i", episode1, scene1);
 
+#ifdef SATURN
+	vg_saturn_debug_stage(701, "loadscene_before_textures");
+#endif
 	if (!LoadTextures(temp_string, delete_textures))  	  						
 	{
+#ifdef SATURN
+		vg_saturn_debug_stage(702, "loadscene_textures_failed");
+#endif
 		//MessageBox(NULL,"Couldn't load GLTextures","ERROR",MB_OK|MB_ICONEXCLAMATION);                              
 		return false;   
 	}      	
+#ifdef SATURN
+	vg_saturn_debug_stage(703, "loadscene_after_textures");
+#endif
     if (!LoadPoints(temp_string))
     {
+#ifdef SATURN
+		vg_saturn_debug_stage(704, "loadscene_points_failed");
+#endif
         //MessageBox(NULL,"Couldn't load points","ERROR",MB_OK|MB_ICONEXCLAMATION);                              
         return false;
     } 
+#ifdef SATURN
+	vg_saturn_debug_stage(705, "loadscene_after_points");
+#endif
     if (!LoadNodes(temp_string))
     {
+#ifdef SATURN
+		vg_saturn_debug_stage(706, "loadscene_nodes_failed");
+#endif
         //MessageBox(NULL,"Couldn't load nodes","ERROR",MB_OK|MB_ICONEXCLAMATION);                              
         return false;
     }    
+#ifdef SATURN
+	vg_saturn_debug_stage(707, "loadscene_after_nodes");
+#endif
     if (!LoadText(temp_string))  
     {  
+#ifdef SATURN
+		vg_saturn_debug_stage(708, "loadscene_text_failed");
+#endif
         //MessageBox(NULL,"Couldn't load text file","ERROR",MB_OK|MB_ICONEXCLAMATION);                              
         return false;      
     }          
+#ifdef SATURN
+	vg_saturn_debug_stage(709, "loadscene_after_text");
+#else
     if(episode1 == 2 || episode1 == 3 || episode1 == 4)   
     if (!Load_BG(temp_string))     
     {
         //MessageBox(NULL,"Couldn't load sceneX.bg","ERROR",MB_OK|MB_ICONEXCLAMATION);                              
         return false;                              
     }           
+#endif
 
     no_fx=0;
 
@@ -2893,7 +3371,13 @@ bool LoadScene( int episode1, int scene1, bool delete_textures )
 	
 	sprintf( temp_string.string, "scene/episode%i/scene%i.dat", episode1, scene1);
 
-#ifdef SWITCH
+#ifdef SATURN
+	char saturn_scene_filename[256];
+	SaturnNormalizeCdPath(temp_string.string, saturn_scene_filename, sizeof(saturn_scene_filename));
+	vg_saturn_debug_stage(712, "loadscene_dat_before_fopen");
+	fp = VG_TEXT_OPEN(saturn_scene_filename, "r");
+	vg_saturn_debug_stage(713, "loadscene_dat_after_fopen");
+#elif defined(SWITCH)
 	if (strstr(temp_string.string, "rom:") == NULL)
 	{
 		char tempfilename[200];
@@ -2947,12 +3431,14 @@ bool LoadScene( int episode1, int scene1, bool delete_textures )
 	{
 
 #endif
+#ifndef SATURN
 		for (int i = 0; temp_string.string[i]; i++) {
 			temp_string.string[i] = tolower(temp_string.string[i]);
 		}
 		fp = fopen(temp_string.string, "r");
 		//printf("LoadScene NO CONVERSION : %s\n", temp_string.string);
 	}
+#endif
 
 	//fp  = fopen( temp_string.string, "r");
 	                
@@ -2969,61 +3455,61 @@ bool LoadScene( int episode1, int scene1, bool delete_textures )
 #endif
     {   
 		
-        fscanf(fp, "%i", &game_mode);  
+        VG_TEXT_SCAN(fp, "%i", &game_mode);  
 
 		game_mode = FRONT;
 
-        fscanf(fp, "%i", &no_sprites);
-        fscanf(fp, "%i", &no_of_keyframes);
-        fscanf(fp, "%i", &game_time);
-        fscanf(fp, "%i", &fade_in);
-        fscanf(fp, "%i", &fade_out);
-        fscanf(fp, "%i", &scene_shake);
-        fscanf(fp, "%i", &music_loop);
-        fscanf(fp, "%i", &g_type);
+        VG_TEXT_SCAN(fp, "%i", &no_sprites);
+        VG_TEXT_SCAN(fp, "%i", &no_of_keyframes);
+        VG_TEXT_SCAN(fp, "%i", &game_time);
+        VG_TEXT_SCAN(fp, "%i", &fade_in);
+        VG_TEXT_SCAN(fp, "%i", &fade_out);
+        VG_TEXT_SCAN(fp, "%i", &scene_shake);
+        VG_TEXT_SCAN(fp, "%i", &music_loop);
+        VG_TEXT_SCAN(fp, "%i", &g_type);
 
         for( int i=0; i < no_sprites;i++)
 		if(i >= 0 && i < TOTAL_NO_SPRITES)
         {
-	        fscanf(fp,"%f", &sprite[i].x);
-	        fscanf(fp,"%f", &sprite[i].y);
-	        fscanf(fp,"%f", &sprite[i].width);
-	        fscanf(fp,"%f", &sprite[i].height);
+	        VG_TEXT_SCAN(fp,"%f", &sprite[i].x);
+	        VG_TEXT_SCAN(fp,"%f", &sprite[i].y);
+	        VG_TEXT_SCAN(fp,"%f", &sprite[i].width);
+	        VG_TEXT_SCAN(fp,"%f", &sprite[i].height);
 	        
-	        fscanf(fp,"%f", &sprite[i].w);
-	        fscanf(fp,"%f", &sprite[i].z);
-	        fscanf(fp,"%f", &sprite[i].box_width);
-	        fscanf(fp,"%f", &sprite[i].box_height);
+	        VG_TEXT_SCAN(fp,"%f", &sprite[i].w);
+	        VG_TEXT_SCAN(fp,"%f", &sprite[i].z);
+	        VG_TEXT_SCAN(fp,"%f", &sprite[i].box_width);
+	        VG_TEXT_SCAN(fp,"%f", &sprite[i].box_height);
 	        
 	        for ( int j=0;j<4;j++)
 	        {
-	            fscanf(fp,"%f", &sprite[i].u[j]);
-	            fscanf(fp,"%f", &sprite[i].v[j]);
+	            VG_TEXT_SCAN(fp,"%f", &sprite[i].u[j]);
+	            VG_TEXT_SCAN(fp,"%f", &sprite[i].v[j]);
             }
 
-	        fscanf(fp,"%i", &sprite[i].id);
+	        VG_TEXT_SCAN(fp,"%i", &sprite[i].id);
 
 			if( sprite[i].id >= 0 && sprite[i].id < 200)
 	        if( texture_fx[sprite[i].id] == 2 || texture_fx[sprite[i].id] == 3 || texture_fx[sprite[i].id] == 4 )
 	           sprite[i].fx_id = animation_fx[sprite[i].id];
 	           
-	        fscanf(fp,"%i", &sprite[i].score);
-	        fscanf(fp, "%i", &sprite[i].anim_state);
-	        fscanf(fp,"%i", &sprite[i].anim);
-	        fscanf(fp,"%f", &sprite[i].alpha);
-	        fscanf(fp,"%i", &sprite[i].linked_sprite);
-	        fscanf(fp,"%i", &sprite[i].priority);
-	        fscanf(fp,"%i", &sprite[i].type);
-	        fscanf(fp,"%i", &temp_grab_switch); // Bool
-	        fscanf(fp,"%i", &temp_mouseover);   // Bool
-	        fscanf(fp,"%i", &sprite[i].sector);
-	        fscanf(fp,"%i", &sprite[i].sector_action); 
-	        fscanf(fp,"%i", &sprite[i].onCreate);
-	        fscanf(fp,"%i", &sprite[i].onCreate_action);
-	        fscanf(fp,"%i", &sprite[i].rank);
-	        fscanf(fp,"%i", &sprite[i].onDeath_action);
-	        fscanf(fp,"%f", &sprite[i].light);		        
-            fscanf(fp,"%i", &sprite[i].global_flag);
+	        VG_TEXT_SCAN(fp,"%i", &sprite[i].score);
+	        VG_TEXT_SCAN(fp, "%i", &sprite[i].anim_state);
+	        VG_TEXT_SCAN(fp,"%i", &sprite[i].anim);
+	        VG_TEXT_SCAN(fp,"%f", &sprite[i].alpha);
+	        VG_TEXT_SCAN(fp,"%i", &sprite[i].linked_sprite);
+	        VG_TEXT_SCAN(fp,"%i", &sprite[i].priority);
+	        VG_TEXT_SCAN(fp,"%i", &sprite[i].type);
+	        VG_TEXT_SCAN(fp,"%i", &temp_grab_switch); // Bool
+	        VG_TEXT_SCAN(fp,"%i", &temp_mouseover);   // Bool
+	        VG_TEXT_SCAN(fp,"%i", &sprite[i].sector);
+	        VG_TEXT_SCAN(fp,"%i", &sprite[i].sector_action); 
+	        VG_TEXT_SCAN(fp,"%i", &sprite[i].onCreate);
+	        VG_TEXT_SCAN(fp,"%i", &sprite[i].onCreate_action);
+	        VG_TEXT_SCAN(fp,"%i", &sprite[i].rank);
+	        VG_TEXT_SCAN(fp,"%i", &sprite[i].onDeath_action);
+	        VG_TEXT_SCAN(fp,"%f", &sprite[i].light);		        
+            VG_TEXT_SCAN(fp,"%i", &sprite[i].global_flag);
 
 			SAFE_INT2BOOL(temp_grab_switch, sprite[i].grab_switch);
 			SAFE_INT2BOOL(temp_mouseover, sprite[i].mouseover);
@@ -3045,7 +3531,7 @@ bool LoadScene( int episode1, int scene1, bool delete_textures )
 
         } 
 
-        fclose(fp);      
+        VG_TEXT_CLOSE(fp);      
     
     }       
 
@@ -4052,7 +4538,7 @@ bool LoadTextures(sString sfilename, bool delete_textures)
 
 	Texture stexture;
 
-    FILE *fpt;
+    VG_TEXT_FILE *fpt;
     
     g_fx_id=0; // Reset this or nasty things happen
 
@@ -4064,7 +4550,17 @@ bool LoadTextures(sString sfilename, bool delete_textures)
 	errno_t err; 
 #endif
 
-#ifdef SWITCH
+#ifdef SATURN
+	char saturn_filename[256];
+	SaturnNormalizeCdPath(sfilename.string, saturn_filename, sizeof(saturn_filename));
+	vg_saturn_debug_stage(710, "loadtextures_before_fopen");
+	fpt = VG_TEXT_OPEN(saturn_filename, "r");
+	vg_saturn_debug_stage(711, "loadtextures_after_fopen");
+	if (fpt == NULL) {
+		vg_saturn_debug_stage(728, "loadtextures_open_failed");
+		return false;
+	}
+#elif defined SWITCH
 	if (strstr(sfilename.string, "rom:") == NULL)
 	{
 		char tempfilename[200];
@@ -4117,6 +4613,7 @@ bool LoadTextures(sString sfilename, bool delete_textures)
 	else
 	{
 #endif
+#ifndef SATURN
 		for (int i = 0; sfilename.string[i]; i++) {
 			sfilename.string[i] = tolower(sfilename.string[i]);
 		}
@@ -4124,6 +4621,7 @@ bool LoadTextures(sString sfilename, bool delete_textures)
 		//printf("LoadTEXTURE NO CONVERSION : %s\n", sfilename.string);
 
 	}
+#endif
 
 
 	//fpt  = fopen( sfilename.string, "r");
@@ -4204,7 +4702,19 @@ bool LoadTextures(sString sfilename, bool delete_textures)
 		}
 #endif
 
-		fscanf( fpt, "%i", &numsubmtls); 
+#ifdef SATURN
+		numsubmtls = 0;
+		vg_saturn_debug_stage(722, "loadtextures_before_count");
+		if (VG_TEXT_SCAN( fpt, "%i", &numsubmtls) != 1 ||
+			numsubmtls < 0 || numsubmtls > NUMBER_OF_SUBMATERIALS) {
+			VG_TEXT_CLOSE(fpt);
+			vg_saturn_debug_stage(729, "loadtextures_bad_count");
+			return false;
+		}
+		vg_saturn_debug_stage(723, "loadtextures_after_count");
+#else
+		VG_TEXT_SCAN( fpt, "%i", &numsubmtls); 
+#endif
 		//printf("NUMSUBMATERIALS %d\n", numsubmtls);
 //      	sString material[numsubmtls]; 
       	
@@ -4218,12 +4728,15 @@ bool LoadTextures(sString sfilename, bool delete_textures)
 #endif
 
         memset( texture_fx, 0, sizeof(texture_fx) );               
+#ifdef SATURN
+		vg_saturn_debug_stage(724, "loadtextures_before_materials");
+#endif
              
         for ( int i=0;i<numsubmtls;i++)   
 		if(i >= 0 && i < 200) 
         {                   
-            fscanf( fpt, "%i", &texture_fx[i]);     
-            fscanf( fpt, "%s", &material[i].string);  
+            VG_TEXT_SCAN( fpt, "%i", &texture_fx[i]);     
+            VG_TEXT_SCAN( fpt, "%s", &material[i].string);  
 
 			// HiRes backgrounds...
 			if(VG_HIRES_BACKGROUNDS == true) 
@@ -4979,17 +5492,42 @@ bool LoadTextures(sString sfilename, bool delete_textures)
 
         }  
  
-    fclose(fpt); 
+    VG_TEXT_CLOSE(fpt); 
+#ifdef SATURN
+	vg_saturn_debug_stage(725, "loadtextures_after_materials");
+#endif
 
 	} // is file open
 
     memset( animation_fx, 0, sizeof(animation_fx) );
+#ifdef SATURN
+	vg_saturn_debug_stage(726, "loadtextures_before_anim_loop");
+#endif
     
 	for( int loop=0;loop<numsubmtls;loop++)
 	if(loop >= 0 && loop < 200)
     {
+#ifdef SATURN
+		if (material[loop].string[0] == '\0') {
+			animation_fx[loop] = -1;
+			if (RENDERER == RENDER_OPENGL) {
+				unsigned int texID_img;
+				glGenTextures(1, &texID_img);
+				texID[loop] = texID_img;
+			}
+			continue;
+		}
+#endif
         if( texture_fx[loop] == 2 || texture_fx[loop] == 3 || texture_fx[loop] == 4)
+		{
+#ifdef SATURN
+			if (loop == 0) vg_saturn_debug_stage(727, "loadtextures_before_first_anim");
+#endif
             animation_fx[loop] = LoadAnim( material[loop], loop, -1);
+#ifdef SATURN
+			if (loop == 0) vg_saturn_debug_stage(730, "loadtextures_after_first_anim");
+#endif
+		}
         else
             animation_fx[loop] = -1;   
 		
@@ -5242,6 +5780,9 @@ bool LoadTextures(sString sfilename, bool delete_textures)
 			if(loadType == 0)
 			{
 				Image image1;
+#ifdef SATURN
+				if (loop == 0) vg_saturn_debug_stage(731, "loadtextures_before_first_image");
+#endif
 				if (!ImageLoad(tempfilename, &image1)) {
 					printf("Can't Load Texture %s\n", tempfilename);
 	        		return 0;

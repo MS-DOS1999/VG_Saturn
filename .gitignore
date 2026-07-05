@@ -2,6 +2,8 @@
 /refs_dc_version/
 /build/
 /cd/
+/logs/
+/.mednafen-home/
 /*.bin
 /*.cue
 /*.elf

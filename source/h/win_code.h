@@ -8,6 +8,9 @@
 #endif
 #include <string.h>    
 #include "globals.h" 
+#ifdef SATURN
+#include "saturn_debug.h"
+#endif
 
 #define MOUSE_CURSOR_ACTIVE  0   
 
@@ -247,6 +250,9 @@ void KillGLWindow()								// Properly Kill The Window
 int CreateGLWindow(char* title, int width, int height, int bits, bool fullscreenflag)
 {
 #if defined SWITCH || defined DREAMCAST
+#ifdef SATURN
+	vg_saturn_debug_stage(610, "create_gl_enter");
+#endif
 	GLuint		PixelFormat;
 
 	long window_posX = 0;
@@ -260,13 +266,28 @@ int CreateGLWindow(char* title, int width, int height, int bits, bool fullscreen
 
 	fullscreen = fullscreenflag;
 
+#ifdef SATURN
+	vg_saturn_debug_stage(611, "before_resize_gl");
+#endif
 	ReSizeGLScene(width, height);
+#ifdef SATURN
+	vg_saturn_debug_stage(612, "after_resize_gl");
+#endif
 
+#ifdef SATURN
+	vg_saturn_debug_stage(613, "before_init_gl");
+#endif
 	if (!InitGL())									// Initialize Our Newly Created GL Window
 	{
+#ifdef SATURN
+		vg_saturn_debug_stage(614, "init_gl_failed");
+#endif
 		KillGLWindow();								// Reset The Display
 		return false;								// Return FALSE
 	}
+#ifdef SATURN
+	vg_saturn_debug_stage(615, "after_init_gl");
+#endif
 
 	
 
@@ -281,18 +302,39 @@ int CreateGLWindow(char* title, int width, int height, int bits, bool fullscreen
 		scene = 0;
 	}
 
+#ifdef SATURN
+	vg_saturn_debug_stage(616, "before_create_load_scene");
+#endif
 	LoadScene(episode, scene, false);
+#ifdef SATURN
+	vg_saturn_debug_stage(617, "after_create_load_scene");
+#endif
 
 	sc_width = working_sc_width;
 	sc_height = working_sc_height;
 
+#ifdef SATURN
+	vg_saturn_debug_stage(618, "before_create_ratio");
+#endif
 	Set_Screen_Ratio();
+#ifdef SATURN
+	vg_saturn_debug_stage(619, "after_create_ratio");
+#endif
 	fade = 1.0f;
 	render_sequence = 0;
 	//printf("EnterDrawGLCreate\n");
+#ifdef SATURN
+	vg_saturn_debug_stage(620, "before_create_draw");
+#endif
 	DrawGLScene(true, 1);
+#ifdef SATURN
+	vg_saturn_debug_stage(621, "after_create_draw");
+#endif
 	//printf("ExitDrawGLCreate\n");
 
+#ifdef SATURN
+	vg_saturn_debug_stage(622, "create_gl_done");
+#endif
 	return(1);
 #endif
 	/*GLuint		PixelFormat;			// Holds The Results After Searching For A Match

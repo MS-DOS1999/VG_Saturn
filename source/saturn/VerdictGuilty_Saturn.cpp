@@ -284,6 +284,7 @@ int warning_timer = 0;
 #include "ram_tracking.h"
 #include "joypad.h"
 #include "saturn_debug.h"
+#include "saturn_platform.h"
 
 void AlertSmooth(int reduce, unsigned int tex, float U, float V, float U1, float V1)
 {
@@ -420,6 +421,7 @@ int main(int argc, char **argv)
 	vg_saturn_debug_stage(4, "after_init_controller");
 
 	print_ram_stats();
+	vg_saturn_debug_stage(21, "after_print_ram_stats");
 
 	// Saturn audio is disabled for now.
 
@@ -489,8 +491,10 @@ int main(int argc, char **argv)
 //	}
 
 	memset(VG_CHARACTER_LOCKS, 0, sizeof(VG_CHARACTER_LOCKS));
+	vg_saturn_debug_stage(22, "after_lock_memset");
 
 	GetDisplaySettings(); //enumdisplaysettings
+	vg_saturn_debug_stage(23, "after_display_settings");
 
 	//global_lpCmdLine = lpCmdLine;
 
@@ -498,6 +502,7 @@ int main(int argc, char **argv)
 //	MAX_vertical   = GetSystemMetrics(SM_CYSCREEN);
 
 	GetDesktopResolution(temp_horizontal, temp_vertical);
+	vg_saturn_debug_stage(24, "after_desktop_resolution");
 	 
 	MAX_horizontal = temp_horizontal;    
 	MAX_vertical = temp_vertical;
@@ -523,15 +528,29 @@ int main(int argc, char **argv)
 	 
 	time_diff=0;                          
 	           
-    sprite = new object[TOTAL_NO_SPRITES];          
-    hud    = new object[TOTAL_NO_HUD]; 
-    Fx     = new object[TOTAL_NO_FX_SPRITES];      
+    vg_saturn_debug_stage(241, "before_object_pools");
+    vg_saturn_cart_object_pool_reset();
+    sprite = (object *)vg_saturn_cart_object_alloc(sizeof(object)*TOTAL_NO_SPRITES, 16);
+	vg_saturn_debug_stage(242, "after_sprite_pool");
+    hud    = (object *)vg_saturn_cart_object_alloc(sizeof(object)*TOTAL_NO_HUD, 16);
+	vg_saturn_debug_stage(243, "after_hud_pool");
+    Fx     = (object *)vg_saturn_cart_object_alloc(sizeof(object)*TOTAL_NO_FX_SPRITES, 16);
+    if(sprite == NULL || hud == NULL || Fx == NULL)
+    {
+        vg_saturn_debug_puts("[FATAL] cart object pool allocation failed");
+        for(;;) {}
+    }
+	vg_saturn_debug_stage(25, "after_object_pools");
     
 	memset(sprite, 0, sizeof(object)*TOTAL_NO_SPRITES );
+	vg_saturn_debug_stage(251, "after_sprite_memset");
     memset(hud, 0, sizeof(object)*TOTAL_NO_HUD );    
+	vg_saturn_debug_stage(252, "after_hud_memset");
     memset(Fx, 0, sizeof(object)*TOTAL_NO_FX_SPRITES ); 
+	vg_saturn_debug_stage(253, "after_fx_memset");
        
     memset(a_texture, 0, sizeof(animation_texture)*MAX_FX_ID );
+	vg_saturn_debug_stage(26, "after_a_texture_memset");
 
     for(int xyz = 0; xyz < 75; xyz++)
     {
@@ -541,6 +560,7 @@ int main(int argc, char **argv)
     }
                                 
     fullscreen = true;                                               
+	vg_saturn_debug_stage(27, "after_anim_texture_init");
 		
 	STEAM_ACTIVE = false;
 
@@ -548,6 +568,7 @@ int main(int argc, char **argv)
 		//STEAM_ACTIVE = SteamAPI_Init(); 
 	#endif
 
+    vg_saturn_debug_stage(28, "before_loadcfg");
     LoadCFG();  
 	vg_saturn_debug_stage(5, "after_loadcfg");
 	   
@@ -562,17 +583,23 @@ int main(int argc, char **argv)
 
 		// Create Our OpenGL Window     
 		printf("SCREEN SIZE %d %d\n", sc_width, sc_height);
+		vg_saturn_debug_stage(61, "before_create_gl_window");
 		if(!CreateGLWindow("Verdict Guilty™", sc_width, sc_height, sc_bits, fullscreen))
 		{		 
+			vg_saturn_debug_stage(62, "create_gl_window_failed");
 			//MessageBox (HWND_DESKTOP, "Couldn't create gl_window", "Error", MB_OK | MB_ICONEXCLAMATION);
 			//return 0;						 			// Quit If Window Was Not Created
 		}                                                             
 		else                     
 		{           
+			vg_saturn_debug_stage(63, "after_create_gl_window");
 			Set_Screen_Ratio();                     
+			vg_saturn_debug_stage(64, "after_set_screen_ratio");
 			fade = 1.0f;    
 			render_sequence = 0;             
+			vg_saturn_debug_stage(65, "before_initial_draw");
 			DrawGLScene(true, 1);
+			vg_saturn_debug_stage(66, "after_initial_draw");
 
 			//if(RENDERER == RENDER_OPENGL)
 				//SwapBuffers(hDC);
@@ -583,8 +610,11 @@ int main(int argc, char **argv)
 				 TranslateMessage(&msg);				// Translate The Message    
 				 DispatchMessage(&msg);					// Dispatch The Message             
 			} */
+			vg_saturn_debug_stage(67, "before_initial_set_sprite");
 			Set_Sprite(2, 0, ONCE, ANIM_SPRITE, ANIM_NOT_WALKING); // BETA Logo          
+			vg_saturn_debug_stage(68, "after_initial_set_sprite");
 			Animate(-1, -1);               
+			vg_saturn_debug_stage(69, "after_initial_animate");
 		}
 
 	}
@@ -4288,9 +4318,15 @@ int main(int argc, char **argv)
                              
 } // While not done        
 
+#if defined(SATURN)
+    sprite = NULL;
+    Fx = NULL;
+    hud = NULL;
+#else
     delete [] sprite; 
     delete [] Fx;     
     delete [] hud;    
+#endif
 
     #if IS_FULL_STEAM == 1  
 	  

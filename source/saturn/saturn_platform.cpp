@@ -2,6 +2,7 @@
 #include "saturn_debug.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <yaul.h>
 
@@ -12,6 +13,7 @@ static constexpr uint32_t kClutCount = 512;
 static constexpr uint32_t kFrameUploadMax = 384;
 static constexpr uint32_t kCacheSlotBytes = 0x00090000;
 static constexpr uint32_t kMaxCacheSlots = 7;
+static constexpr uint32_t kCartObjectPoolBytes = 0x00110000;
 
 struct SaturnTexture {
     uint16_t width;
@@ -68,16 +70,172 @@ static uint32_t g_cache_tick;
 static uint32_t g_next_texture = 1;
 static volatile uint64_t g_frame_count;
 static smpc_peripheral_digital_t g_digital[2];
+static uint8_t *g_cart_object_pool_base;
+static uint32_t g_cart_object_pool_size;
+static uint32_t g_cart_object_pool_cursor;
 static bool g_inited;
 static bool g_warned_no_cart;
+static bool g_debug_passed_first_frame;
 static uint32_t g_debug_last_cmdts;
 static uint32_t g_debug_last_uploads;
 static uint32_t g_debug_last_upload_bytes;
+static bool g_debug_first_texture_cd;
+static uint32_t g_debug_texture_cd_count;
+static uint32_t g_debug_texture_cd_attempt_count;
+static cdfs_filelist_entry_t g_cd_entries[512];
+static uint8_t g_cd_sector_buffer[CDFS_SECTOR_SIZE];
 
 static uint8_t g_placeholder_pixels[(16 * 16) / 2];
 static uint16_t g_placeholder_palette[16];
 
 static vdp1_cmdt_t *cmdt_next(void);
+static bool cd_find_path(const char *path, cdfs_filelist_entry_t *out_entry);
+static bool cd_read_entry_to(const cdfs_filelist_entry_t *entry, uint8_t *data,
+                             uint32_t capacity, uint32_t *out_size);
+
+static int
+char_lower_ascii(int c)
+{
+    if ((c >= 'A') && (c <= 'Z')) {
+        return c - 'A' + 'a';
+    }
+    return c;
+}
+
+static int
+char_upper_ascii(int c)
+{
+    if ((c >= 'a') && (c <= 'z')) {
+        return c - 'a' + 'A';
+    }
+    return c;
+}
+
+static bool
+cd_name_equal(const char *left, const char *right)
+{
+    while ((*left != '\0') && (*left != ';') &&
+           (*right != '\0') && (*right != ';')) {
+        if (char_lower_ascii((unsigned char)*left) !=
+            char_lower_ascii((unsigned char)*right)) {
+            return false;
+        }
+        left++;
+        right++;
+    }
+
+    return ((*left == '\0') || (*left == ';')) &&
+           ((*right == '\0') || (*right == ';'));
+}
+
+static void
+cd_component_iso_name(const char *raw, char *component, size_t component_size)
+{
+    char base[9];
+    char ext[4];
+    uint32_t base_count = 0;
+    uint32_t ext_count = 0;
+    const char *dot = nullptr;
+
+    for (const char *scan = raw; *scan != '\0'; scan++) {
+        if (*scan == '.') {
+            dot = scan;
+        }
+    }
+
+    const char *scan = raw;
+    while ((*scan != '\0') && (scan != dot) && (base_count < 8)) {
+        base[base_count++] = char_upper_ascii((unsigned char)*scan++);
+    }
+    base[base_count] = '\0';
+
+    if (dot != nullptr) {
+        scan = dot + 1;
+        while ((*scan != '\0') && (ext_count < 3)) {
+            ext[ext_count++] = char_upper_ascii((unsigned char)*scan++);
+        }
+    }
+    ext[ext_count] = '\0';
+
+    if (component_size == 0) {
+        return;
+    }
+
+    uint32_t out = 0;
+    for (uint32_t i = 0; (i < base_count) && ((out + 1) < component_size); i++) {
+        component[out++] = base[i];
+    }
+    if ((ext_count > 0) && ((out + 1) < component_size)) {
+        component[out++] = '.';
+        for (uint32_t i = 0; (i < ext_count) && ((out + 1) < component_size); i++) {
+            component[out++] = ext[i];
+        }
+    }
+    component[out] = '\0';
+}
+
+static bool
+cd_next_component(const char **cursor, char *component, size_t component_size,
+                  bool *has_more)
+{
+    const char *path = *cursor;
+    while ((*path == '/') || (*path == '\\')) {
+        path++;
+    }
+
+    if (*path == '\0') {
+        component[0] = '\0';
+        *cursor = path;
+        *has_more = false;
+        return false;
+    }
+
+    char raw_component[128];
+    size_t count = 0;
+    while ((*path != '\0') && (*path != '/') && (*path != '\\')) {
+        if (count + 1 < sizeof(raw_component)) {
+            raw_component[count++] = *path;
+        }
+        path++;
+    }
+    raw_component[count] = '\0';
+    cd_component_iso_name(raw_component, component, component_size);
+
+    const char *next = path;
+    while ((*next == '/') || (*next == '\\')) {
+        next++;
+    }
+    *has_more = (*next != '\0');
+    *cursor = path;
+
+    return component[0] != '\0';
+}
+
+static bool
+cd_find_entry(cdfs_filelist_t *filelist, const char *name,
+              cdfs_entry_type_t type, cdfs_filelist_entry_t *out_entry)
+{
+    for (uint32_t i = 0; i < filelist->entries_count; i++) {
+        const cdfs_filelist_entry_t *entry = &filelist->entries[i];
+        if ((entry->type == type) && cd_name_equal(entry->name, name)) {
+            *out_entry = *entry;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static uint32_t
+align_up_u32(uint32_t value, uint32_t align)
+{
+    if (align == 0) {
+        return value;
+    }
+
+    const uint32_t mask = align - 1U;
+    return (value + mask) & ~mask;
+}
 
 static void
 debug_marker_draw(void)
@@ -135,16 +293,44 @@ clampf(float value, float lo, float hi)
 }
 
 static bool
+path_contains_ci(const char *path, const char *needle)
+{
+    if ((path == nullptr) || (needle == nullptr) || (*needle == '\0')) {
+        return false;
+    }
+
+    for (const char *cursor = path; *cursor != '\0'; cursor++) {
+        const char *a = cursor;
+        const char *b = needle;
+        while ((*a != '\0') && (*b != '\0') &&
+               (char_lower_ascii((unsigned char)*a) ==
+                char_lower_ascii((unsigned char)*b))) {
+            a++;
+            b++;
+        }
+        if (*b == '\0') {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool
 path_is_suppressed_background(const char *path)
 {
     if (path == nullptr) {
         return false;
     }
 
-    return (strstr(path, "verdict/bgs/") != nullptr) ||
-           (strstr(path, "verdict\\bgs\\") != nullptr) ||
-           (strstr(path, "verdict/title/bg") != nullptr) ||
-           (strstr(path, "verdict\\title\\bg") != nullptr);
+    return path_contains_ci(path, "verdict/bgs/") ||
+           path_contains_ci(path, "verdict\\bgs\\") ||
+           path_contains_ci(path, "verdict/load/") ||
+           path_contains_ci(path, "verdict\\load\\") ||
+           path_contains_ci(path, "verdict/title/bg") ||
+           path_contains_ci(path, "verdict\\title\\bg") ||
+           path_contains_ci(path, "verdict/story/bg/") ||
+           path_contains_ci(path, "verdict\\story\\bg\\");
 }
 
 static void
@@ -211,6 +397,24 @@ frame_uploads_reset(void)
 }
 
 static void
+cart_object_pool_init(void)
+{
+    void *cart = dram_cart_area_get();
+    const size_t cart_size = dram_cart_size_get();
+    g_cart_object_pool_base = nullptr;
+    g_cart_object_pool_size = 0;
+    g_cart_object_pool_cursor = 0;
+
+    if ((cart == nullptr) || (cart_size < (kCartObjectPoolBytes + kCacheSlotBytes))) {
+        return;
+    }
+
+    g_cart_object_pool_base = static_cast<uint8_t *>(cart);
+    g_cart_object_pool_size = kCartObjectPoolBytes;
+    memset(g_cart_object_pool_base, 0, g_cart_object_pool_size);
+}
+
+static void
 cache_init(void)
 {
     void *cart = dram_cart_area_get();
@@ -218,17 +422,23 @@ cache_init(void)
     g_cache_slot_count = 0;
     memset(g_cache_slots, 0, sizeof(g_cache_slots));
 
-    if ((cart == nullptr) || (cart_size < kCacheSlotBytes)) {
+    if ((cart == nullptr) || (cart_size <= kCartObjectPoolBytes)) {
         g_warned_no_cart = true;
         return;
     }
 
-    uint32_t slots = (uint32_t)(cart_size / kCacheSlotBytes);
+    uint8_t *base = static_cast<uint8_t *>(cart) + kCartObjectPoolBytes;
+    const size_t cache_size = cart_size - kCartObjectPoolBytes;
+    if (cache_size < kCacheSlotBytes) {
+        g_warned_no_cart = true;
+        return;
+    }
+
+    uint32_t slots = (uint32_t)(cache_size / kCacheSlotBytes);
     if (slots > kMaxCacheSlots) {
         slots = kMaxCacheSlots;
     }
 
-    uint8_t *base = static_cast<uint8_t *>(cart);
     for (uint32_t i = 0; i < slots; i++) {
         g_cache_slots[i].base = base + (i * kCacheSlotBytes);
     }
@@ -254,6 +464,52 @@ texture_evict(GLuint texture)
 
     tex.cache_slot = -1;
     tex.resident = false;
+}
+
+extern "C" void
+vg_saturn_cart_object_pool_reset(void)
+{
+    if (g_cart_object_pool_base == nullptr) {
+        return;
+    }
+
+    g_cart_object_pool_cursor = 0;
+    memset(g_cart_object_pool_base, 0, g_cart_object_pool_size);
+}
+
+extern "C" void *
+vg_saturn_cart_object_alloc(size_t size, size_t align)
+{
+    if ((g_cart_object_pool_base == nullptr) || (size == 0)) {
+        return nullptr;
+    }
+
+    if (align < 16) {
+        align = 16;
+    }
+
+    const uint32_t aligned_cursor =
+        align_up_u32(g_cart_object_pool_cursor, (uint32_t)align);
+    if ((aligned_cursor > g_cart_object_pool_size) ||
+        (size > (g_cart_object_pool_size - aligned_cursor))) {
+        return nullptr;
+    }
+
+    uint8_t *ptr = g_cart_object_pool_base + aligned_cursor;
+    g_cart_object_pool_cursor = aligned_cursor + (uint32_t)size;
+    return ptr;
+}
+
+extern "C" size_t
+vg_saturn_cart_object_pool_size(void)
+{
+    return g_cart_object_pool_size;
+}
+
+extern "C" size_t
+vg_saturn_cart_object_pool_used(void)
+{
+    return g_cart_object_pool_cursor;
 }
 
 static int
@@ -362,8 +618,20 @@ texture_load_from_cd(GLuint texture)
         return false;
     }
 
-    FILE *file = fopen(tex.path, "rb");
-    if (file == nullptr) {
+    const bool debug_this_read = (g_debug_texture_cd_attempt_count < 96);
+    g_debug_texture_cd_attempt_count++;
+    if (debug_this_read) {
+        vg_saturn_debug_stage(733, "texture_cd_before_read");
+        vg_saturn_debug_puts("[TEX] ");
+        vg_saturn_debug_puts(tex.path);
+        vg_saturn_debug_puts("\n");
+    }
+
+    cdfs_filelist_entry_t entry = {};
+    if (!cd_find_path(tex.path, &entry)) {
+        if (debug_this_read) {
+            vg_saturn_debug_stage(732, "texture_cd_read_failed");
+        }
         if (!tex.warned) {
             dbgio_printf("Texture CD open failed: %s\n", tex.path);
             tex.warned = true;
@@ -371,14 +639,26 @@ texture_load_from_cd(GLuint texture)
         return false;
     }
 
-    SatTextureHeader header;
-    uint16_t palette[16];
-    if ((fread(&header, sizeof(header), 1, file) != 1) ||
-        (memcmp(header.magic, "VG4P", 4) != 0) ||
-        (header.width == 0) || (header.height == 0) ||
-        (header.data_size == 0) ||
-        (fread(palette, sizeof(palette), 1, file) != 1)) {
-        fclose(file);
+    if (cd_block_sectors_read(entry.starting_fad, g_cd_sector_buffer,
+                              CDFS_SECTOR_SIZE) != 0) {
+        if (debug_this_read) {
+            vg_saturn_debug_stage(732, "texture_cd_read_failed");
+        }
+        if (!tex.warned) {
+            dbgio_printf("Texture CD first sector failed: %s\n", tex.path);
+            tex.warned = true;
+        }
+        return false;
+    }
+    const uint32_t file_size = (uint32_t)entry.size;
+
+    if (debug_this_read) {
+        vg_saturn_debug_stage(734, "texture_cd_after_read");
+    }
+
+    const uint32_t header_bytes = sizeof(SatTextureHeader);
+    const uint32_t palette_bytes = sizeof(uint16_t) * 16;
+    if (file_size < (header_bytes + palette_bytes)) {
         if (!tex.warned) {
             dbgio_printf("Texture CD header invalid: %s\n", tex.path);
             tex.warned = true;
@@ -386,8 +666,25 @@ texture_load_from_cd(GLuint texture)
         return false;
     }
 
-    if (header.data_size > kCacheSlotBytes) {
-        fclose(file);
+    SatTextureHeader header;
+    memcpy(&header, g_cd_sector_buffer, sizeof(header));
+    uint16_t palette[16];
+    memcpy(palette, g_cd_sector_buffer + header_bytes, sizeof(palette));
+
+    if ((memcmp(header.magic, "VG4P", 4) != 0) ||
+        (header.width == 0) || (header.height == 0) ||
+        (header.data_size == 0) || 
+        ((header_bytes + palette_bytes + header.data_size) > file_size)) {
+        if (!tex.warned) {
+            dbgio_printf("Texture CD header invalid: %s\n", tex.path);
+            tex.warned = true;
+        }
+        return false;
+    }
+
+    const uint32_t sector_count = cdfs_sector_count_round(file_size);
+    const uint32_t rounded_size = sector_count * CDFS_SECTOR_SIZE;
+    if (rounded_size > kCacheSlotBytes) {
         if (!tex.warned) {
             dbgio_printf("Texture too large for ext slot: %s\n", tex.path);
             tex.warned = true;
@@ -395,9 +692,8 @@ texture_load_from_cd(GLuint texture)
         return false;
     }
 
-    const int slot_index = cache_slot_acquire(texture, header.data_size);
+    const int slot_index = cache_slot_acquire(texture, rounded_size);
     if (slot_index < 0) {
-        fclose(file);
         if (!tex.warned) {
             dbgio_printf("No ext RAM slot for: %s\n", tex.path);
             tex.warned = true;
@@ -406,23 +702,29 @@ texture_load_from_cd(GLuint texture)
     }
 
     CacheSlot &slot = g_cache_slots[slot_index];
-    if (fread(slot.base, header.data_size, 1, file) != 1) {
-        fclose(file);
+    uint32_t loaded_size = 0;
+    if (!cd_read_entry_to(&entry, slot.base, rounded_size, &loaded_size)) {
         texture_evict(texture);
         if (!tex.warned) {
-            dbgio_printf("Texture CD read failed: %s\n", tex.path);
+            dbgio_printf("Texture CD slot read failed: %s\n", tex.path);
             tex.warned = true;
         }
         return false;
     }
+    memmove(slot.base, slot.base + header_bytes + palette_bytes, header.data_size);
+    slot.bytes = header.data_size;
 
-    fclose(file);
     tex.width = header.width;
     tex.height = header.height;
     tex.data_bytes = header.data_size;
     tex.resident = true;
     tex.warned = false;
     texture_palette_upload(tex, palette);
+    if (debug_this_read) {
+        vg_saturn_debug_stage(735, "texture_cd_cached");
+    }
+    g_debug_first_texture_cd = true;
+    g_debug_texture_cd_count++;
     return true;
 }
 
@@ -571,7 +873,9 @@ vg_saturn_init(void)
     smpc_peripheral_init();
     cd_block_init();
     cdfs_config_default_set();
+    cdfs_init();
     dram_cart_init();
+    cart_object_pool_init();
 
     vdp2_tvmd_display_res_set(VDP2_TVMD_INTERLACE_NONE, VDP2_TVMD_HORZ_NORMAL_A,
                               VDP2_TVMD_VERT_240);
@@ -612,6 +916,115 @@ vg_saturn_init(void)
     vg_saturn_debug_stage(20, "platform_init_done");
 }
 
+static bool
+cd_find_path(const char *path, cdfs_filelist_entry_t *out_entry)
+{
+    if ((path == nullptr) || (out_entry == nullptr)) {
+        return false;
+    }
+
+    cdfs_filelist_t filelist;
+    cdfs_filelist_init(&filelist, g_cd_entries,
+                       (int32_t)(sizeof(g_cd_entries) / sizeof(g_cd_entries[0])));
+    cdfs_filelist_root_read(&filelist);
+
+    const char *cursor = path;
+    if ((cursor[0] == 'c' || cursor[0] == 'C') &&
+        (cursor[1] == 'd' || cursor[1] == 'D') &&
+        ((cursor[2] == '/') || (cursor[2] == '\\'))) {
+        cursor += 3;
+    }
+
+    cdfs_filelist_entry_t entry = {};
+    char component[ISO_FILENAME_MAX_LENGTH + 1];
+    bool has_more = false;
+    bool found_component = false;
+
+    while (cd_next_component(&cursor, component, sizeof(component), &has_more)) {
+        found_component = true;
+        if (has_more) {
+            if (!cd_find_entry(&filelist, component, CDFS_ENTRY_TYPE_DIRECTORY, &entry)) {
+                return false;
+            }
+            cdfs_filelist_read(&filelist, entry);
+        } else {
+            if (!cd_find_entry(&filelist, component, CDFS_ENTRY_TYPE_FILE, &entry)) {
+                return false;
+            }
+        }
+    }
+
+    if (!found_component || (entry.type != CDFS_ENTRY_TYPE_FILE) || (entry.size == 0)) {
+        return false;
+    }
+
+    *out_entry = entry;
+    return true;
+}
+
+static bool
+cd_read_entry_to(const cdfs_filelist_entry_t *entry, uint8_t *data,
+                 uint32_t capacity, uint32_t *out_size)
+{
+    if ((entry == nullptr) || (data == nullptr) || (out_size == nullptr) ||
+        (entry->type != CDFS_ENTRY_TYPE_FILE) || (entry->size == 0)) {
+        return false;
+    }
+
+    const uint32_t sector_count = cdfs_sector_count_round((uint32_t)entry->size);
+    const uint32_t rounded_size = sector_count * CDFS_SECTOR_SIZE;
+    if (rounded_size > capacity) {
+        return false;
+    }
+
+    if (cd_block_sectors_read(entry->starting_fad, data, (uint32_t)entry->size) != 0) {
+        return false;
+    }
+
+    if (capacity > (uint32_t)entry->size) {
+        data[entry->size] = 0;
+    }
+    *out_size = (uint32_t)entry->size;
+    return true;
+}
+
+bool
+vg_saturn_cd_read_file(const char *path, void **out_data, uint32_t *out_size)
+{
+    if ((path == nullptr) || (out_data == nullptr) || (out_size == nullptr)) {
+        return false;
+    }
+
+    *out_data = nullptr;
+    *out_size = 0;
+
+    cdfs_filelist_entry_t entry = {};
+    if (!cd_find_path(path, &entry)) {
+        return false;
+    }
+
+    const uint32_t sector_count = cdfs_sector_count_round((uint32_t)entry.size);
+    const uint32_t rounded_size = sector_count * CDFS_SECTOR_SIZE;
+    uint8_t *data = static_cast<uint8_t *>(malloc(rounded_size + 1));
+    if (data == nullptr) {
+        return false;
+    }
+
+    if (!cd_read_entry_to(&entry, data, rounded_size + 1, out_size)) {
+        free(data);
+        return false;
+    }
+
+    *out_data = data;
+    return true;
+}
+
+void
+vg_saturn_cd_free_file(void *data)
+{
+    free(data);
+}
+
 void
 vg_saturn_frame_begin(void)
 {
@@ -640,6 +1053,11 @@ vg_saturn_frame_end(void)
     vdp1_sync_render();
     vdp1_sync();
     vdp1_sync_wait();
+
+    if (!g_debug_passed_first_frame) {
+        g_debug_passed_first_frame = true;
+        vg_saturn_debug_pass("first_vdp1_frame");
+    }
 
     dbgio_flush();
     if ((g_frame_count % 60) == 0) {

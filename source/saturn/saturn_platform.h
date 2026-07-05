@@ -2,6 +2,7 @@
 #define VG_SATURN_PLATFORM_H
 
 #include <stddef.h>
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "gl_dc.h"
@@ -25,6 +26,12 @@ void vg_saturn_frame_begin(void);
 void vg_saturn_frame_end(void);
 uint64_t vg_saturn_millis_get(void);
 void vg_saturn_lowram_clear(void);
+void vg_saturn_cart_object_pool_reset(void);
+void *vg_saturn_cart_object_alloc(size_t size, size_t align);
+size_t vg_saturn_cart_object_pool_size(void);
+size_t vg_saturn_cart_object_pool_used(void);
+bool vg_saturn_cd_read_file(const char *path, void **out_data, uint32_t *out_size);
+void vg_saturn_cd_free_file(void *data);
 
 void vg_saturn_input_update(void);
 uint16_t vg_saturn_input_pressed(int port);
