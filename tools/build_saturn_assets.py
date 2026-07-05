@@ -136,7 +136,7 @@ def resize_half_mitchell(image):
 
 
 def rgb_to_argb1555(r, g, b, alpha=1):
-    return (alpha << 15) | ((int(r) >> 3) << 10) | ((int(g) >> 3) << 5) | (int(b) >> 3)
+    return (alpha << 15) | ((int(b) >> 3) << 10) | ((int(g) >> 3) << 5) | (int(r) >> 3)
 
 
 def quantize_palette_15(image):
@@ -278,6 +278,8 @@ def convert_png(src_file, src_root, out_root):
 
 def sat_file_current(src_file, dst_file):
     if not dst_file.exists():
+        return False
+    if dst_file.stat().st_mtime < Path(__file__).stat().st_mtime:
         return False
     if dst_file.stat().st_mtime < src_file.stat().st_mtime:
         return False

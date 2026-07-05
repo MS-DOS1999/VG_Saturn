@@ -300,6 +300,12 @@ int CreateGLWindow(char* title, int width, int height, int bits, bool fullscreen
 	{
 		episode = 10;
 		scene = 0;
+#ifdef SATURN
+#if VG_SATURN_BOOT_EPISODE >= 0
+		episode = VG_SATURN_BOOT_EPISODE;
+		scene = VG_SATURN_BOOT_SCENE;
+#endif
+#endif
 	}
 
 #ifdef SATURN

@@ -122,12 +122,14 @@ static bool SaturnPathContainsCI(const char *text, const char *needle)
 
 static bool SaturnTexturePathSuppressed(const char *path)
 {
-    return SaturnPathContainsCI(path, "VERDICT/LOAD/") ||
-           SaturnPathContainsCI(path, "VERDICT\\LOAD\\") ||
-           SaturnPathContainsCI(path, "VERDICT/BGS/") ||
+    return SaturnPathContainsCI(path, "VERDICT/BGS/") ||
            SaturnPathContainsCI(path, "VERDICT\\BGS\\") ||
            SaturnPathContainsCI(path, "VERDICT/TITLE/BG") ||
            SaturnPathContainsCI(path, "VERDICT\\TITLE\\BG") ||
+           SaturnPathContainsCI(path, "VERDICT/TITLE/BG_VS") ||
+           SaturnPathContainsCI(path, "VERDICT\\TITLE\\BG_VS") ||
+           SaturnPathContainsCI(path, "VERDICT/TITLE/BG_ANIM") ||
+           SaturnPathContainsCI(path, "VERDICT\\TITLE\\BG_ANIM") ||
            SaturnPathContainsCI(path, "VERDICT/STORY/BG/") ||
            SaturnPathContainsCI(path, "VERDICT\\STORY\\BG\\");
 }
@@ -4674,6 +4676,7 @@ bool LoadTextures(sString sfilename, bool delete_textures)
             
 			SAFE_DELETE_ARRAY(texID);
 			DeleteAllAnim();
+			vg_saturn_texture_cache_reset();
 			for (size_t lol = 0; lol < tex2048x256.size(); ++lol) {
         		glDeleteTextures(1, &tex2048x256[lol].topLeft);
         		glDeleteTextures(1, &tex2048x256[lol].topRight);
@@ -4724,7 +4727,7 @@ bool LoadTextures(sString sfilename, bool delete_textures)
 			texID = new GLuint[numsubmtls]; 
          
 		if(RENDERER == RENDER_OPENGL) 
-			memset( texID, 0, sizeof(texID) );
+			memset( texID, 0, sizeof(GLuint) * numsubmtls );
 #endif
 
         memset( texture_fx, 0, sizeof(texture_fx) );               
@@ -5516,6 +5519,25 @@ bool LoadTextures(sString sfilename, bool delete_textures)
 				texID[loop] = texID_img;
 			}
 			continue;
+		}
+#endif
+#ifdef SATURN
+		if (RENDERER == RENDER_OPENGL) {
+			bool shared_texture = false;
+			for (int previous = 0; previous < loop; previous++) {
+				if (previous >= 0 && previous < 200 &&
+					texID[previous] != 0 &&
+					texture_fx[previous] == texture_fx[loop] &&
+					strcmp(material[previous].string, material[loop].string) == 0) {
+					texID[loop] = texID[previous];
+					animation_fx[loop] = animation_fx[previous];
+					shared_texture = true;
+					break;
+				}
+			}
+			if (shared_texture) {
+				continue;
+			}
 		}
 #endif
         if( texture_fx[loop] == 2 || texture_fx[loop] == 3 || texture_fx[loop] == 4)

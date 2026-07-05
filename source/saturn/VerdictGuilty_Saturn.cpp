@@ -77,6 +77,14 @@
 
 #define BREAKER_CHARACTER_BUILD
 
+#ifndef VG_SATURN_BOOT_EPISODE
+#define VG_SATURN_BOOT_EPISODE -1
+#endif
+
+#ifndef VG_SATURN_BOOT_SCENE
+#define VG_SATURN_BOOT_SCENE 0
+#endif
+
 
 
       
@@ -380,6 +388,26 @@ void AlertSmooth(int reduce, unsigned int tex, float U, float V, float U1, float
 }
 
 bool continueWithoutSaving = false;
+
+static void
+SaturnDebugGameState(void)
+{
+	static int next_state_log = 0;
+	const int now = (int)TimerGetTime();
+	if (now < next_state_log) {
+		return;
+	}
+	next_state_log = now + 1000;
+
+	char buffer[192];
+	snprintf(buffer, sizeof(buffer),
+	         "[STATE] t=%d ep=%d sc=%d gm=%d mode=%d title=%d next=%d vgmode=%d sel=%d held=%04x press=%04x\n",
+	         now, episode, scene, game_mode, mode, title_sequence,
+	         next_scene ? 1 : 0, VG_GAME_MODE, VG_SELECTED,
+	         (unsigned int)vg_saturn_input_held(0),
+	         (unsigned int)vg_saturn_input_pressed(0));
+	vg_saturn_debug_puts(buffer);
+}
 
 
 int main(int argc, char **argv)
@@ -1423,6 +1451,7 @@ int main(int argc, char **argv)
 	{                  
         
 		UpdateControllersStatus();
+		SaturnDebugGameState();
         if(1) // If There Are No Messages                
  	    {                                                                                                                                                                                                                                                                                                                                                                              
                          

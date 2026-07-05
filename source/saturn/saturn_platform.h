@@ -39,9 +39,12 @@ uint16_t vg_saturn_input_held(int port);
 
 GLuint vg_saturn_texture_create(GLsizei width, GLsizei height, const void *argb1555);
 void vg_saturn_texture_destroy(GLuint texture);
+void vg_saturn_texture_cache_reset(void);
 void vg_saturn_texture_set_source_path(GLuint texture, const char *path);
 void vg_saturn_texture_replace(GLuint texture, GLsizei width, GLsizei height,
                                const void *data, uint32_t data_size);
+void vg_saturn_draw_solid_quad(const vg_saturn_vertex_t *vertices,
+                               float r, float g, float b, float a);
 void vg_saturn_draw_textured_quad(GLuint texture, const vg_saturn_vertex_t *vertices,
                                   float r, float g, float b, float a);
 void vg_saturn_draw_line(float x0, float y0, float x1, float y1,

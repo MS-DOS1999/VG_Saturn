@@ -525,37 +525,37 @@ static void InputGetState(int i, XINPUT_STATE_CUSTOM *st)
 
 	if((i == 0 && Mapple1Connected() == true) || (i == 1 && Mapple2Connected() == true))
 	{
-		if (ButtonPushed(i, CONT_START))
+		if (ButtonPressed(i, CONT_START))
 			st->Gamepad.wButtons |= XINPUT_GAMEPAD_START;
 
-		if (ButtonPushed(i, CONT_A))
+		if (ButtonPressed(i, CONT_A))
 			st->Gamepad.wButtons |= XINPUT_GAMEPAD_A;
 
-		if (ButtonPushed(i, CONT_B))
+		if (ButtonPressed(i, CONT_B))
 			st->Gamepad.wButtons |= XINPUT_GAMEPAD_B;
 
-		if (ButtonPushed(i, CONT_X))
+		if (ButtonPressed(i, CONT_X))
 			st->Gamepad.wButtons |= XINPUT_GAMEPAD_X;
 
-		if (ButtonPushed(i, CONT_Y))
+		if (ButtonPressed(i, CONT_Y))
 			st->Gamepad.wButtons |= XINPUT_GAMEPAD_Y;
 
-		if (ButtonPushed(i, CONT_DPAD_LEFT))
+		if (ButtonPressed(i, CONT_DPAD_LEFT))
 			st->Gamepad.wButtons |= XINPUT_GAMEPAD_DPAD_LEFT;
 
-		if (ButtonPushed(i, CONT_DPAD_RIGHT))
+		if (ButtonPressed(i, CONT_DPAD_RIGHT))
 			st->Gamepad.wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT;
 
-		if (ButtonPushed(i, CONT_DPAD_UP))
+		if (ButtonPressed(i, CONT_DPAD_UP))
 			st->Gamepad.wButtons |= XINPUT_GAMEPAD_DPAD_UP;
 
-		if (ButtonPushed(i, CONT_DPAD_DOWN))
+		if (ButtonPressed(i, CONT_DPAD_DOWN))
 			st->Gamepad.wButtons |= XINPUT_GAMEPAD_DPAD_DOWN;
 
-		if (LTriggerPushed(i))
+		if (LTriggerPressed(i))
 			st->Gamepad.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER;
 
-		if (RTriggerPushed(i))
+		if (RTriggerPressed(i))
 			st->Gamepad.wButtons |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
 
 

@@ -7,6 +7,7 @@ endif
 include $(YAUL_INSTALL_ROOT)/share/build.pre.mk
 
 BUILTIN_ASSETS=
+VG_EXTRA_FLAGS ?=
 
 SH_PROGRAM:= verdict_guilty_saturn
 SH_SRCS:= \
@@ -43,7 +44,8 @@ VG_COMMON_FLAGS:= \
 	-Wno-parentheses \
 	-Wno-reorder \
 	-Wno-shadow \
-	-Wno-missing-field-initializers
+	-Wno-missing-field-initializers \
+	$(VG_EXTRA_FLAGS)
 
 SH_CFLAGS+= $(VG_COMMON_FLAGS)
 SH_CXXFLAGS+= $(VG_COMMON_FLAGS) -fpermissive

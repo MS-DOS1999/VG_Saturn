@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <yaul.h>
 
 static constexpr uint32_t kMaxCmdts = 2048;
@@ -11,9 +12,10 @@ static constexpr uint32_t kMaxTextures = 512;
 static constexpr uint32_t kTextureBudget = 0x00054000;
 static constexpr uint32_t kClutCount = 512;
 static constexpr uint32_t kFrameUploadMax = 384;
-static constexpr uint32_t kCacheSlotBytes = 0x00090000;
-static constexpr uint32_t kMaxCacheSlots = 7;
+static constexpr uint32_t kMaxCacheSlots = 256;
 static constexpr uint32_t kCartObjectPoolBytes = 0x00110000;
+static constexpr bool kDebugDrawVdp1Marker = false;
+static constexpr bool kDebugUseDefaultVdp1Layout = false;
 
 struct SaturnTexture {
     uint16_t width;
@@ -31,6 +33,7 @@ struct SaturnTexture {
 struct CacheSlot {
     uint8_t *base;
     uint32_t bytes;
+    uint32_t capacity;
     uint32_t last_used;
     GLuint texture;
     bool used;
@@ -46,6 +49,13 @@ struct FrameUpload {
     uint16_t sh;
     uint16_t slot_w;
     bool used;
+};
+
+struct OrderedQuadVertex {
+    float x;
+    float y;
+    float u;
+    float v;
 };
 
 struct SatTextureHeader {
@@ -66,6 +76,9 @@ static uint32_t g_frame_upload_count;
 static SaturnTexture g_textures[kMaxTextures];
 static CacheSlot g_cache_slots[kMaxCacheSlots];
 static uint32_t g_cache_slot_count;
+static uint8_t *g_cache_base;
+static uint32_t g_cache_size;
+static uint32_t g_cache_cursor;
 static uint32_t g_cache_tick;
 static uint32_t g_next_texture = 1;
 static volatile uint64_t g_frame_count;
@@ -79,6 +92,54 @@ static bool g_debug_passed_first_frame;
 static uint32_t g_debug_last_cmdts;
 static uint32_t g_debug_last_uploads;
 static uint32_t g_debug_last_upload_bytes;
+static uint32_t g_debug_last_quads_in;
+static uint32_t g_debug_last_quads_drawn;
+static uint32_t g_debug_last_quads_skipped;
+static uint32_t g_debug_last_quads_scaled;
+static uint32_t g_debug_last_quads_distorted;
+static uint32_t g_debug_skip_alpha;
+static uint32_t g_debug_skip_texture;
+static uint32_t g_debug_skip_bounds;
+static uint32_t g_debug_skip_upload;
+static uint32_t g_debug_skip_cmdt;
+static bool g_debug_sample_valid;
+static int32_t g_debug_sample_x;
+static int32_t g_debug_sample_y;
+static int32_t g_debug_sample_w;
+static int32_t g_debug_sample_h;
+static uint32_t g_debug_sample_sw;
+static uint32_t g_debug_sample_sh;
+static uint32_t g_debug_vdp1_edsr;
+static uint32_t g_debug_vdp1_lopr;
+static uint32_t g_debug_vdp1_copr;
+static uint32_t g_debug_vdp1_modr;
+static uint32_t g_debug_vdp1_tvmr;
+static uint32_t g_debug_vdp1_ptmr;
+static uint32_t g_debug_vdp2_tvmd;
+static uint32_t g_debug_vdp2_bgon;
+static uint32_t g_debug_vdp2_spctl;
+static uint32_t g_debug_vdp2_prisa;
+static uint32_t g_debug_vdp2_prisb;
+static uint32_t g_debug_vdp2_prisc;
+static uint32_t g_debug_vdp2_prisd;
+static uint32_t g_frame_quads_in;
+static uint32_t g_frame_quads_drawn;
+static uint32_t g_frame_quads_skipped;
+static uint32_t g_frame_quads_scaled;
+static uint32_t g_frame_quads_distorted;
+static uint32_t g_frame_skip_alpha;
+static uint32_t g_frame_skip_texture;
+static uint32_t g_frame_skip_bounds;
+static uint32_t g_frame_skip_upload;
+static uint32_t g_frame_skip_cmdt;
+static bool g_frame_sample_valid;
+static int32_t g_frame_sample_x;
+static int32_t g_frame_sample_y;
+static int32_t g_frame_sample_w;
+static int32_t g_frame_sample_h;
+static uint32_t g_frame_sample_sw;
+static uint32_t g_frame_sample_sh;
+static uint32_t g_frame_debug_draw_logs;
 static bool g_debug_first_texture_cd;
 static uint32_t g_debug_texture_cd_count;
 static uint32_t g_debug_texture_cd_attempt_count;
@@ -89,6 +150,10 @@ static uint8_t g_placeholder_pixels[(16 * 16) / 2];
 static uint16_t g_placeholder_palette[16];
 
 static vdp1_cmdt_t *cmdt_next(void);
+static void debug_draw_log(const char *kind, GLuint input_texture,
+                           GLuint final_texture, const SaturnTexture *tex,
+                           uint16_t sx, uint16_t sy, uint16_t sw,
+                           uint16_t sh);
 static bool cd_find_path(const char *path, cdfs_filelist_entry_t *out_entry);
 static bool cd_read_entry_to(const cdfs_filelist_entry_t *entry, uint8_t *data,
                              uint32_t capacity, uint32_t *out_size);
@@ -126,6 +191,25 @@ cd_name_equal(const char *left, const char *right)
 
     return ((*left == '\0') || (*left == ';')) &&
            ((*right == '\0') || (*right == ';'));
+}
+
+static bool
+cd_name_equal_without_dot(const char *entry_name, const char *candidate_name)
+{
+    char compact[ISO_FILENAME_MAX_LENGTH + 1];
+    uint32_t out = 0;
+
+    for (const char *scan = candidate_name;
+         (*scan != '\0') && (*scan != ';') && ((out + 1) < sizeof(compact));
+         scan++) {
+        if (*scan == '.') {
+            continue;
+        }
+        compact[out++] = *scan;
+    }
+    compact[out] = '\0';
+
+    return cd_name_equal(entry_name, compact);
 }
 
 static void
@@ -217,7 +301,9 @@ cd_find_entry(cdfs_filelist_t *filelist, const char *name,
 {
     for (uint32_t i = 0; i < filelist->entries_count; i++) {
         const cdfs_filelist_entry_t *entry = &filelist->entries[i];
-        if ((entry->type == type) && cd_name_equal(entry->name, name)) {
+        if ((entry->type == type) &&
+            (cd_name_equal(entry->name, name) ||
+             cd_name_equal_without_dot(entry->name, name))) {
             *out_entry = *entry;
             return true;
         }
@@ -238,6 +324,29 @@ align_up_u32(uint32_t value, uint32_t align)
 }
 
 static void
+debug_draw_log(const char *kind, GLuint input_texture, GLuint final_texture,
+               const SaturnTexture *tex, uint16_t sx, uint16_t sy,
+               uint16_t sw, uint16_t sh)
+{
+    if (g_debug_passed_first_frame || (g_frame_debug_draw_logs >= 8)) {
+        return;
+    }
+    g_frame_debug_draw_logs++;
+
+    char buffer[256];
+    snprintf(buffer, sizeof(buffer),
+             "[DRAW] %s in=%lu tex=%lu wh=%lux%lu src=%lu,%lu,%lux%lu path=%s\n",
+             (kind != nullptr) ? kind : "?",
+             (uint32_t)input_texture,
+             (uint32_t)final_texture,
+             tex != nullptr ? (uint32_t)tex->width : 0,
+             tex != nullptr ? (uint32_t)tex->height : 0,
+             (uint32_t)sx, (uint32_t)sy, (uint32_t)sw, (uint32_t)sh,
+             (tex != nullptr && tex->path[0] != '\0') ? tex->path : "-");
+    vg_saturn_debug_puts(buffer);
+}
+
+static void
 debug_marker_draw(void)
 {
     vdp1_cmdt_t *cmdt = cmdt_next();
@@ -246,13 +355,19 @@ debug_marker_draw(void)
     }
 
     int16_vec2_t points[4] = {};
-    points[0].x = 4;
-    points[0].y = 4;
-    points[1].x = 84;
-    points[1].y = 4;
+    points[0].x = 8;
+    points[0].y = 40;
+    points[1].x = 40;
+    points[1].y = 40;
+    points[2].x = 40;
+    points[2].y = 8;
+    points[3].x = 8;
+    points[3].y = 8;
 
-    vdp1_cmdt_line_set(cmdt);
-    vdp1_cmdt_color_set(cmdt, RGB1555(1, 0, 31, 0));
+    vdp1_cmdt_polygon_set(cmdt);
+    vdp1_cmdt_draw_mode_t draw_mode = {};
+    vdp1_cmdt_draw_mode_set(cmdt, draw_mode);
+    vdp1_cmdt_color_set(cmdt, RGB1555(1, 31, 0, 31));
     vdp1_cmdt_vtx_set(cmdt, points);
 }
 
@@ -269,9 +384,7 @@ rgb1555_from_float(float r, float g, float b)
     const uint16_t ri = (uint16_t)(r * 31.0f);
     const uint16_t gi = (uint16_t)(g * 31.0f);
     const uint16_t bi = (uint16_t)(b * 31.0f);
-    rgb1555_t out;
-    out.raw = (uint16_t)(0x8000 | (ri << 10) | (gi << 5) | bi);
-    return out;
+    return RGB1555(1, ri, gi, bi);
 }
 
 static uint16_t
@@ -290,6 +403,118 @@ clampf(float value, float lo, float hi)
         return hi;
     }
     return value;
+}
+
+static int16_t
+round_to_i16(float value)
+{
+    if (value >= 32767.0f) {
+        return 32767;
+    }
+    if (value <= -32768.0f) {
+        return -32768;
+    }
+    return (int16_t)((value >= 0.0f) ? (value + 0.5f) : (value - 0.5f));
+}
+
+static bool
+nearly_equal(float a, float b, float epsilon)
+{
+    const float diff = a - b;
+    return (diff >= -epsilon) && (diff <= epsilon);
+}
+
+static void
+quad_order_spatial(const vg_saturn_vertex_t *vertices, OrderedQuadVertex *out)
+{
+    OrderedQuadVertex tmp[4];
+    int order[4] = {0, 1, 2, 3};
+
+    for (int i = 0; i < 4; i++) {
+        tmp[i].x = vertices[i].x;
+        tmp[i].y = vertices[i].y;
+        tmp[i].u = vertices[i].u;
+        tmp[i].v = vertices[i].v;
+    }
+
+    for (int pass = 0; pass < 3; pass++) {
+        for (int i = 0; i < 3 - pass; i++) {
+            const OrderedQuadVertex &a = tmp[order[i]];
+            const OrderedQuadVertex &b = tmp[order[i + 1]];
+            if ((a.y > b.y) || (nearly_equal(a.y, b.y, 0.5f) && (a.x > b.x))) {
+                const int swap = order[i];
+                order[i] = order[i + 1];
+                order[i + 1] = swap;
+            }
+        }
+    }
+
+    if (tmp[order[0]].x > tmp[order[1]].x) {
+        const int swap = order[0];
+        order[0] = order[1];
+        order[1] = swap;
+    }
+    if (tmp[order[2]].x > tmp[order[3]].x) {
+        const int swap = order[2];
+        order[2] = order[3];
+        order[3] = swap;
+    }
+
+    out[0] = tmp[order[0]]; /* upper-left */
+    out[1] = tmp[order[1]]; /* upper-right */
+    out[2] = tmp[order[3]]; /* lower-right */
+    out[3] = tmp[order[2]]; /* lower-left */
+}
+
+static bool
+quad_bounds(const OrderedQuadVertex *quad, float *left, float *top,
+            float *right, float *bottom)
+{
+    float min_x = quad[0].x;
+    float max_x = quad[0].x;
+    float min_y = quad[0].y;
+    float max_y = quad[0].y;
+
+    for (int i = 1; i < 4; i++) {
+        if (quad[i].x < min_x) min_x = quad[i].x;
+        if (quad[i].x > max_x) max_x = quad[i].x;
+        if (quad[i].y < min_y) min_y = quad[i].y;
+        if (quad[i].y > max_y) max_y = quad[i].y;
+    }
+
+    *left = min_x;
+    *right = max_x;
+    *top = min_y;
+    *bottom = max_y;
+
+    return ((max_x - min_x) >= 1.0f) && ((max_y - min_y) >= 1.0f);
+}
+
+static bool
+quad_is_axis_aligned(const OrderedQuadVertex *quad)
+{
+    return nearly_equal(quad[0].y, quad[1].y, 0.75f) &&
+           nearly_equal(quad[2].y, quad[3].y, 0.75f) &&
+           nearly_equal(quad[0].x, quad[3].x, 0.75f) &&
+           nearly_equal(quad[1].x, quad[2].x, 0.75f);
+}
+
+static vdp1_cmdt_char_flip_t
+quad_flip_get(const OrderedQuadVertex *quad)
+{
+    vdp1_cmdt_char_flip_t flip = VDP1_CMDT_CHAR_FLIP_NONE;
+    const float left_u = (quad[0].u + quad[3].u) * 0.5f;
+    const float right_u = (quad[1].u + quad[2].u) * 0.5f;
+    const float top_v = (quad[0].v + quad[1].v) * 0.5f;
+    const float bottom_v = (quad[2].v + quad[3].v) * 0.5f;
+
+    if (left_u > right_u) {
+        flip = (vdp1_cmdt_char_flip_t)(flip | VDP1_CMDT_CHAR_FLIP_H);
+    }
+    if (top_v > bottom_v) {
+        flip = (vdp1_cmdt_char_flip_t)(flip | VDP1_CMDT_CHAR_FLIP_V);
+    }
+    return flip;
 }
 
 static bool
@@ -325,10 +550,12 @@ path_is_suppressed_background(const char *path)
 
     return path_contains_ci(path, "verdict/bgs/") ||
            path_contains_ci(path, "verdict\\bgs\\") ||
-           path_contains_ci(path, "verdict/load/") ||
-           path_contains_ci(path, "verdict\\load\\") ||
            path_contains_ci(path, "verdict/title/bg") ||
            path_contains_ci(path, "verdict\\title\\bg") ||
+           path_contains_ci(path, "verdict/title/bg_vs") ||
+           path_contains_ci(path, "verdict\\title\\bg_vs") ||
+           path_contains_ci(path, "verdict/title/bg_anim") ||
+           path_contains_ci(path, "verdict\\title\\bg_anim") ||
            path_contains_ci(path, "verdict/story/bg/") ||
            path_contains_ci(path, "verdict\\story\\bg\\");
 }
@@ -405,7 +632,7 @@ cart_object_pool_init(void)
     g_cart_object_pool_size = 0;
     g_cart_object_pool_cursor = 0;
 
-    if ((cart == nullptr) || (cart_size < (kCartObjectPoolBytes + kCacheSlotBytes))) {
+    if ((cart == nullptr) || (cart_size < (kCartObjectPoolBytes + 0x00010000U))) {
         return;
     }
 
@@ -420,6 +647,9 @@ cache_init(void)
     void *cart = dram_cart_area_get();
     const size_t cart_size = dram_cart_size_get();
     g_cache_slot_count = 0;
+    g_cache_base = nullptr;
+    g_cache_size = 0;
+    g_cache_cursor = 0;
     memset(g_cache_slots, 0, sizeof(g_cache_slots));
 
     if ((cart == nullptr) || (cart_size <= kCartObjectPoolBytes)) {
@@ -427,22 +657,28 @@ cache_init(void)
         return;
     }
 
-    uint8_t *base = static_cast<uint8_t *>(cart) + kCartObjectPoolBytes;
+    g_cache_base = static_cast<uint8_t *>(cart) + kCartObjectPoolBytes;
     const size_t cache_size = cart_size - kCartObjectPoolBytes;
-    if (cache_size < kCacheSlotBytes) {
+    if (cache_size < 0x00010000U) {
         g_warned_no_cart = true;
+        g_cache_base = nullptr;
         return;
     }
 
-    uint32_t slots = (uint32_t)(cache_size / kCacheSlotBytes);
-    if (slots > kMaxCacheSlots) {
-        slots = kMaxCacheSlots;
-    }
+    g_cache_size = (uint32_t)cache_size;
+}
 
-    for (uint32_t i = 0; i < slots; i++) {
-        g_cache_slots[i].base = base + (i * kCacheSlotBytes);
+static void
+cache_reset_all(void)
+{
+    memset(g_cache_slots, 0, sizeof(g_cache_slots));
+    g_cache_slot_count = 0;
+    g_cache_cursor = 0;
+
+    for (uint32_t i = 0; i < kMaxTextures; i++) {
+        g_textures[i].resident = false;
+        g_textures[i].cache_slot = -1;
     }
-    g_cache_slot_count = slots;
 }
 
 static void
@@ -515,54 +751,44 @@ vg_saturn_cart_object_pool_used(void)
 static int
 cache_slot_acquire(GLuint texture, uint32_t bytes)
 {
-    if ((g_cache_slot_count == 0) || (bytes > kCacheSlotBytes)) {
+    if ((g_cache_base == nullptr) || (g_cache_size == 0) || (bytes == 0) ||
+        (bytes > g_cache_size)) {
         return -1;
     }
+
+    bytes = align_up_u32(bytes, 16);
 
     SaturnTexture &tex = g_textures[texture];
     if ((tex.cache_slot >= 0) && ((uint32_t)tex.cache_slot < g_cache_slot_count)) {
         CacheSlot &slot = g_cache_slots[tex.cache_slot];
         if (slot.texture == texture) {
             slot.last_used = ++g_cache_tick;
-            slot.bytes = bytes;
             return tex.cache_slot;
         }
     }
 
-    int selected = -1;
-    for (uint32_t i = 0; i < g_cache_slot_count; i++) {
-        if (!g_cache_slots[i].used) {
-            selected = (int)i;
-            break;
-        }
+    if ((g_cache_cursor > g_cache_size) ||
+        (bytes > (g_cache_size - g_cache_cursor)) ||
+        (g_cache_slot_count >= kMaxCacheSlots)) {
+        cache_reset_all();
     }
 
-    if (selected < 0) {
-        uint32_t oldest = 0xFFFFFFFFU;
-        for (uint32_t i = 0; i < g_cache_slot_count; i++) {
-            if (g_cache_slots[i].last_used < oldest) {
-                oldest = g_cache_slots[i].last_used;
-                selected = (int)i;
-            }
-        }
-    }
-
-    if (selected < 0) {
+    if ((g_cache_cursor > g_cache_size) ||
+        (bytes > (g_cache_size - g_cache_cursor)) ||
+        (g_cache_slot_count >= kMaxCacheSlots)) {
         return -1;
     }
 
+    const int selected = (int)g_cache_slot_count++;
     CacheSlot &slot = g_cache_slots[selected];
-    if (slot.used && (slot.texture > 0) && (slot.texture < kMaxTextures)) {
-        SaturnTexture &old_tex = g_textures[slot.texture];
-        old_tex.resident = false;
-        old_tex.cache_slot = -1;
-    }
-
     slot.used = true;
-    slot.texture = texture;
+    slot.base = g_cache_base + g_cache_cursor;
+    slot.capacity = bytes;
     slot.bytes = bytes;
+    slot.texture = texture;
     slot.last_used = ++g_cache_tick;
     tex.cache_slot = selected;
+    g_cache_cursor += bytes;
     return selected;
 }
 
@@ -630,7 +856,7 @@ texture_load_from_cd(GLuint texture)
     cdfs_filelist_entry_t entry = {};
     if (!cd_find_path(tex.path, &entry)) {
         if (debug_this_read) {
-            vg_saturn_debug_stage(732, "texture_cd_read_failed");
+            vg_saturn_debug_stage(732, "texture_cd_find_failed");
         }
         if (!tex.warned) {
             dbgio_printf("Texture CD open failed: %s\n", tex.path);
@@ -639,10 +865,18 @@ texture_load_from_cd(GLuint texture)
         return false;
     }
 
-    if (cd_block_sectors_read(entry.starting_fad, g_cd_sector_buffer,
-                              CDFS_SECTOR_SIZE) != 0) {
+    const int first_read_result =
+        cd_block_sectors_read(entry.starting_fad, g_cd_sector_buffer,
+                              CDFS_SECTOR_SIZE);
+    if (first_read_result != 0) {
         if (debug_this_read) {
-            vg_saturn_debug_stage(732, "texture_cd_read_failed");
+            char fail_buffer[128];
+            snprintf(fail_buffer, sizeof(fail_buffer),
+                     "[CDERR] first path=%s fad=%lu size=%lu ret=%d\n",
+                     tex.path, (uint32_t)entry.starting_fad,
+                     (uint32_t)entry.size, first_read_result);
+            vg_saturn_debug_puts(fail_buffer);
+            vg_saturn_debug_stage(732, "texture_cd_first_read_failed");
         }
         if (!tex.warned) {
             dbgio_printf("Texture CD first sector failed: %s\n", tex.path);
@@ -684,7 +918,7 @@ texture_load_from_cd(GLuint texture)
 
     const uint32_t sector_count = cdfs_sector_count_round(file_size);
     const uint32_t rounded_size = sector_count * CDFS_SECTOR_SIZE;
-    if (rounded_size > kCacheSlotBytes) {
+    if ((g_cache_size == 0) || (rounded_size > g_cache_size)) {
         if (!tex.warned) {
             dbgio_printf("Texture too large for ext slot: %s\n", tex.path);
             tex.warned = true;
@@ -881,12 +1115,33 @@ vg_saturn_init(void)
                               VDP2_TVMD_VERT_240);
     vdp2_scrn_back_color_set(VDP2_VRAM_ADDR(3, 0x01FFFE),
                              RGB1555(1, 0, 4, 0));
-    vdp2_sprite_priority_set(0, 7);
-    vdp1_env_default_set();
+    for (uint32_t i = 0; i < 8; i++) {
+        vdp2_sprite_priority_set(i, 6);
+    }
+
+    if (kDebugUseDefaultVdp1Layout) {
+        vdp1_env_default_set();
+    } else {
+        vdp1_env_t vdp1_env;
+        vdp1_env_default_init(&vdp1_env);
+        vdp1_env.bpp = VDP1_ENV_BPP_16;
+        vdp1_env.rotation = VDP1_ENV_ROTATION_0;
+        vdp1_env.color_mode = VDP1_ENV_COLOR_MODE_RGB_PALETTE;
+        vdp1_env.sprite_type = 1;
+        vdp1_env.erase_color = RGB1555(1, 0, 4, 0);
+        vdp1_env.erase_points[0].x = 0;
+        vdp1_env.erase_points[0].y = 0;
+        vdp1_env.erase_points[1].x = VG_SATURN_SCREEN_W;
+        vdp1_env.erase_points[1].y = VG_SATURN_SCREEN_H;
+        vdp1_env_set(&vdp1_env);
+    }
+    vdp1_sync_interval_set(0);
     vdp2_tvmd_display_set();
     vdp_sync_vblank_out_set(vblank_out_handler, nullptr);
 
-    vdp1_vram_partitions_set(kMaxCmdts, kTextureBudget, 64, kClutCount);
+    if (!kDebugUseDefaultVdp1Layout) {
+        vdp1_vram_partitions_set(kMaxCmdts, kTextureBudget, 64, kClutCount);
+    }
     vdp1_vram_partitions_get(&g_vdp1_parts);
     g_frame_vram_base = static_cast<uint8_t *>(g_vdp1_parts.texture_base);
     g_frame_vram_end = g_frame_vram_base + g_vdp1_parts.texture_size;
@@ -901,8 +1156,10 @@ vg_saturn_init(void)
     cmdt_header_set();
 
     dbgio_init();
-    dbgio_dev_default_init(DBGIO_DEV_VDP2_ASYNC);
-    dbgio_dev_font_load();
+    dbgio_dev_default_init(DBGIO_DEV_NULL);
+    for (uint32_t i = 0; i < 8; i++) {
+        vdp2_sprite_priority_set(i, 6);
+    }
     if (g_warned_no_cart) {
         dbgio_printf("4MB RAM cart missing; sprite streaming disabled\n");
         vg_saturn_debug_stage(19, "platform_init_no_cart");
@@ -936,7 +1193,7 @@ cd_find_path(const char *path, cdfs_filelist_entry_t *out_entry)
     }
 
     cdfs_filelist_entry_t entry = {};
-    char component[ISO_FILENAME_MAX_LENGTH + 1];
+    char component[32];
     bool has_more = false;
     bool found_component = false;
 
@@ -1031,6 +1288,24 @@ vg_saturn_frame_begin(void)
     vg_saturn_init();
     cmdt_header_set();
     frame_uploads_reset();
+    g_frame_quads_in = 0;
+    g_frame_quads_drawn = 0;
+    g_frame_quads_skipped = 0;
+    g_frame_quads_scaled = 0;
+    g_frame_quads_distorted = 0;
+    g_frame_skip_alpha = 0;
+    g_frame_skip_texture = 0;
+    g_frame_skip_bounds = 0;
+    g_frame_skip_upload = 0;
+    g_frame_skip_cmdt = 0;
+    g_frame_sample_valid = false;
+    g_frame_sample_x = 0;
+    g_frame_sample_y = 0;
+    g_frame_sample_w = 0;
+    g_frame_sample_h = 0;
+    g_frame_sample_sw = 0;
+    g_frame_sample_sh = 0;
+    g_frame_debug_draw_logs = 0;
 }
 
 void
@@ -1042,33 +1317,134 @@ vg_saturn_frame_end(void)
         g_cmdt_index = kMaxCmdts - 1;
     }
 
-    debug_marker_draw();
+    if (kDebugDrawVdp1Marker) {
+        debug_marker_draw();
+    }
 
     vdp1_cmdt_end_set(&g_cmdt_list->cmdts[g_cmdt_index]);
     g_cmdt_list->count = (uint16_t)(g_cmdt_index + 1);
     g_debug_last_cmdts = g_cmdt_index + 1;
     g_debug_last_uploads = g_frame_upload_count;
+    g_debug_last_quads_in = g_frame_quads_in;
+    g_debug_last_quads_drawn = g_frame_quads_drawn;
+    g_debug_last_quads_skipped = g_frame_quads_skipped;
+    g_debug_last_quads_scaled = g_frame_quads_scaled;
+    g_debug_last_quads_distorted = g_frame_quads_distorted;
+    g_debug_skip_alpha = g_frame_skip_alpha;
+    g_debug_skip_texture = g_frame_skip_texture;
+    g_debug_skip_bounds = g_frame_skip_bounds;
+    g_debug_skip_upload = g_frame_skip_upload;
+    g_debug_skip_cmdt = g_frame_skip_cmdt;
+    g_debug_sample_valid = g_frame_sample_valid;
+    g_debug_sample_x = g_frame_sample_x;
+    g_debug_sample_y = g_frame_sample_y;
+    g_debug_sample_w = g_frame_sample_w;
+    g_debug_sample_h = g_frame_sample_h;
+    g_debug_sample_sw = g_frame_sample_sw;
+    g_debug_sample_sh = g_frame_sample_sh;
 
     vdp1_sync_cmdt_list_put(g_cmdt_list, 0);
     vdp1_sync_render();
     vdp1_sync();
     vdp1_sync_wait();
 
+    volatile vdp1_ioregs_t * const vdp1_ioregs =
+        (volatile vdp1_ioregs_t *)VDP1_IOREG_BASE;
+    g_debug_vdp1_edsr = vdp1_ioregs->edsr;
+    g_debug_vdp1_lopr = vdp1_ioregs->lopr;
+    g_debug_vdp1_copr = vdp1_ioregs->copr;
+    g_debug_vdp1_modr = vdp1_ioregs->modr;
+    g_debug_vdp1_tvmr = vdp1_ioregs->tvmr;
+    g_debug_vdp1_ptmr = vdp1_ioregs->ptmr;
+
+    volatile vdp2_ioregs_t * const vdp2_ioregs =
+        (volatile vdp2_ioregs_t *)VDP2_IOREG_BASE;
+    g_debug_vdp2_tvmd = vdp2_ioregs->tvmd;
+    g_debug_vdp2_bgon = vdp2_ioregs->bgon;
+    g_debug_vdp2_spctl = vdp2_ioregs->spctl;
+    g_debug_vdp2_prisa = vdp2_ioregs->prisa;
+    g_debug_vdp2_prisb = vdp2_ioregs->prisb;
+    g_debug_vdp2_prisc = vdp2_ioregs->prisc;
+    g_debug_vdp2_prisd = vdp2_ioregs->prisd;
+
     if (!g_debug_passed_first_frame) {
         g_debug_passed_first_frame = true;
         vg_saturn_debug_pass("first_vdp1_frame");
+        vg_saturn_debug_vdp1_regs(g_frame_count, g_debug_vdp1_edsr,
+                                  g_debug_vdp1_lopr,
+                                  g_debug_vdp1_copr,
+                                  g_debug_vdp1_modr,
+                                  g_debug_vdp1_tvmr,
+                                  g_debug_vdp1_ptmr);
+        vg_saturn_debug_vdp1(g_frame_count, g_debug_last_quads_in,
+                             g_debug_last_quads_drawn,
+                             g_debug_last_quads_skipped,
+                             g_debug_last_quads_scaled,
+                             g_debug_last_quads_distorted);
+        vg_saturn_debug_vdp1_detail(g_frame_count, g_debug_skip_alpha,
+                                    g_debug_skip_texture,
+                                    g_debug_skip_bounds,
+                                    g_debug_skip_upload,
+                                    g_debug_skip_cmdt,
+                                    g_debug_sample_valid ? g_debug_sample_x : 0,
+                                    g_debug_sample_valid ? g_debug_sample_y : 0,
+                                    g_debug_sample_valid ? g_debug_sample_w : 0,
+                                    g_debug_sample_valid ? g_debug_sample_h : 0,
+                                    g_debug_sample_valid ? g_debug_sample_sw : 0,
+                                    g_debug_sample_valid ? g_debug_sample_sh : 0);
+        vg_saturn_debug_vdp2_regs(g_frame_count, g_debug_vdp2_tvmd,
+                                  g_debug_vdp2_bgon,
+                                  g_debug_vdp2_spctl,
+                                  g_debug_vdp2_prisa,
+                                  g_debug_vdp2_prisb,
+                                  g_debug_vdp2_prisc,
+                                  g_debug_vdp2_prisd);
     }
 
     dbgio_flush();
-    if ((g_frame_count % 60) == 0) {
+    const uint64_t debug_frame = g_frame_count;
+    if ((debug_frame % 60) == 0) {
         dbgio_printf("[VG] frame=%lu cmdts=%lu uploads=%lu upload_bytes=%lu cache_slots=%lu\n",
-                     (uint32_t)g_frame_count, g_debug_last_cmdts,
+                     (uint32_t)debug_frame, g_debug_last_cmdts,
                      g_debug_last_uploads, g_debug_last_upload_bytes,
                      g_cache_slot_count);
+        dbgio_printf("[VDP1] quads=%lu drawn=%lu skip=%lu scaled=%lu distort=%lu\n",
+                     g_debug_last_quads_in, g_debug_last_quads_drawn,
+                     g_debug_last_quads_skipped, g_debug_last_quads_scaled,
+                     g_debug_last_quads_distorted);
         dbgio_flush();
-        vg_saturn_debug_frame(g_frame_count, g_debug_last_cmdts,
+        vg_saturn_debug_frame(debug_frame, g_debug_last_cmdts,
                               g_debug_last_uploads, g_debug_last_upload_bytes,
                               g_cache_slot_count);
+        vg_saturn_debug_vdp1(debug_frame, g_debug_last_quads_in,
+                             g_debug_last_quads_drawn,
+                             g_debug_last_quads_skipped,
+                             g_debug_last_quads_scaled,
+                             g_debug_last_quads_distorted);
+        vg_saturn_debug_vdp1_detail(debug_frame, g_debug_skip_alpha,
+                                    g_debug_skip_texture,
+                                    g_debug_skip_bounds,
+                                    g_debug_skip_upload,
+                                    g_debug_skip_cmdt,
+                                    g_debug_sample_valid ? g_debug_sample_x : 0,
+                                    g_debug_sample_valid ? g_debug_sample_y : 0,
+                                    g_debug_sample_valid ? g_debug_sample_w : 0,
+                                    g_debug_sample_valid ? g_debug_sample_h : 0,
+                                    g_debug_sample_valid ? g_debug_sample_sw : 0,
+                                    g_debug_sample_valid ? g_debug_sample_sh : 0);
+        vg_saturn_debug_vdp1_regs(debug_frame, g_debug_vdp1_edsr,
+                                  g_debug_vdp1_lopr,
+                                  g_debug_vdp1_copr,
+                                  g_debug_vdp1_modr,
+                                  g_debug_vdp1_tvmr,
+                                  g_debug_vdp1_ptmr);
+        vg_saturn_debug_vdp2_regs(debug_frame, g_debug_vdp2_tvmd,
+                                  g_debug_vdp2_bgon,
+                                  g_debug_vdp2_spctl,
+                                  g_debug_vdp2_prisa,
+                                  g_debug_vdp2_prisb,
+                                  g_debug_vdp2_prisc,
+                                  g_debug_vdp2_prisd);
     }
     vdp2_sync();
     vdp2_sync_wait();
@@ -1142,6 +1518,12 @@ vg_saturn_texture_destroy(GLuint texture)
 }
 
 void
+vg_saturn_texture_cache_reset(void)
+{
+    cache_reset_all();
+}
+
+void
 vg_saturn_texture_set_source_path(GLuint texture, const char *path)
 {
     if ((texture == 0) || (texture >= kMaxTextures) || !g_textures[texture].used) {
@@ -1195,16 +1577,82 @@ vg_saturn_texture_replace(GLuint texture, GLsizei width, GLsizei height,
 }
 
 void
-vg_saturn_draw_textured_quad(GLuint texture, const vg_saturn_vertex_t *vertices,
-                             float r, float g, float b, float a)
+vg_saturn_draw_solid_quad(const vg_saturn_vertex_t *vertices,
+                          float r, float g, float b, float a)
 {
     if ((a <= 0.0f) || (vertices == nullptr)) {
+        g_frame_quads_skipped++;
+        g_frame_skip_alpha++;
+        return;
+    }
+    g_frame_quads_in++;
+
+    OrderedQuadVertex quad[4];
+    quad_order_spatial(vertices, quad);
+
+    float left = 0.0f;
+    float top = 0.0f;
+    float right = 0.0f;
+    float bottom = 0.0f;
+    if (!quad_bounds(quad, &left, &top, &right, &bottom) ||
+        (right < 0.0f) || (bottom < 0.0f) ||
+        (left > (float)(VG_SATURN_SCREEN_W - 1)) ||
+        (top > (float)(VG_SATURN_SCREEN_H - 1))) {
+        g_frame_quads_skipped++;
+        g_frame_skip_bounds++;
         return;
     }
 
-    if ((texture == 0) || (texture >= kMaxTextures) || !g_textures[texture].used ||
+    debug_draw_log("solid", 0, 0, nullptr, 0, 0, 0, 0);
+
+    vdp1_cmdt_t *cmdt = cmdt_next();
+    if (cmdt == nullptr) {
+        g_frame_quads_skipped++;
+        g_frame_skip_cmdt++;
+        return;
+    }
+
+    int16_vec2_t points[4];
+    for (int i = 0; i < 4; i++) {
+        points[i].x = round_to_i16(quad[i].x);
+        points[i].y = round_to_i16(quad[i].y);
+    }
+
+    vdp1_cmdt_draw_mode_t mode = {};
+    if (a < 0.99f) {
+        mode.cc_mode = VDP1_CMDT_CC_HALF_TRANSPARENT;
+    }
+
+    vdp1_cmdt_polygon_set(cmdt);
+    vdp1_cmdt_draw_mode_set(cmdt, mode);
+    vdp1_cmdt_color_set(cmdt, rgb1555_from_float(r, g, b));
+    vdp1_cmdt_vtx_set(cmdt, points);
+    g_frame_quads_drawn++;
+    g_frame_quads_distorted++;
+}
+
+void
+vg_saturn_draw_textured_quad(GLuint texture, const vg_saturn_vertex_t *vertices,
+                             float r, float g, float b, float a)
+{
+    const GLuint input_texture = texture;
+    if (texture == 0) {
+        vg_saturn_draw_solid_quad(vertices, r, g, b, a);
+        return;
+    }
+
+    if ((a <= 0.0f) || (vertices == nullptr)) {
+        g_frame_quads_skipped++;
+        g_frame_skip_alpha++;
+        return;
+    }
+    g_frame_quads_in++;
+
+    if ((texture >= kMaxTextures) || !g_textures[texture].used ||
         g_textures[texture].skipped) {
-        texture = placeholder_texture_get();
+        g_frame_quads_skipped++;
+        g_frame_skip_texture++;
+        return;
     }
 
     SaturnTexture &tex = g_textures[texture];
@@ -1213,19 +1661,46 @@ vg_saturn_draw_textured_quad(GLuint texture, const vg_saturn_vertex_t *vertices,
         texture = placeholder_texture_get();
         pixels = texture_pixels_get(texture);
         if (pixels == nullptr) {
+            g_frame_quads_skipped++;
+            g_frame_skip_texture++;
             return;
         }
     }
 
-    float min_u = vertices[0].u;
-    float max_u = vertices[0].u;
-    float min_v = vertices[0].v;
-    float max_v = vertices[0].v;
+    OrderedQuadVertex quad[4];
+    quad_order_spatial(vertices, quad);
+
+    float left = 0.0f;
+    float top = 0.0f;
+    float right = 0.0f;
+    float bottom = 0.0f;
+    if (!quad_bounds(quad, &left, &top, &right, &bottom) ||
+        (right < 0.0f) || (bottom < 0.0f) ||
+        (left > (float)(VG_SATURN_SCREEN_W - 1)) ||
+        (top > (float)(VG_SATURN_SCREEN_H - 1))) {
+        g_frame_quads_skipped++;
+        g_frame_skip_bounds++;
+        if (!g_frame_sample_valid) {
+            g_frame_sample_valid = true;
+            g_frame_sample_x = round_to_i16(left);
+            g_frame_sample_y = round_to_i16(top);
+            g_frame_sample_w = round_to_i16(right - left);
+            g_frame_sample_h = round_to_i16(bottom - top);
+            g_frame_sample_sw = 0;
+            g_frame_sample_sh = 0;
+        }
+        return;
+    }
+
+    float min_u = quad[0].u;
+    float max_u = quad[0].u;
+    float min_v = quad[0].v;
+    float max_v = quad[0].v;
     for (int i = 1; i < 4; i++) {
-        if (vertices[i].u < min_u) min_u = vertices[i].u;
-        if (vertices[i].u > max_u) max_u = vertices[i].u;
-        if (vertices[i].v < min_v) min_v = vertices[i].v;
-        if (vertices[i].v > max_v) max_v = vertices[i].v;
+        if (quad[i].u < min_u) min_u = quad[i].u;
+        if (quad[i].u > max_u) max_u = quad[i].u;
+        if (quad[i].v < min_v) min_v = quad[i].v;
+        if (quad[i].v > max_v) max_v = quad[i].v;
     }
 
     min_u = clampf(min_u, 0.0f, 1.0f);
@@ -1246,44 +1721,74 @@ vg_saturn_draw_textured_quad(GLuint texture, const vg_saturn_vertex_t *vertices,
 
     const uint16_t sw = (uint16_t)(ex - sx);
     const uint16_t sh = (uint16_t)(ey - sy);
+    debug_draw_log("tex", input_texture, texture, &tex, sx, sy, sw, sh);
     FrameUpload *upload = frame_upload_get(texture, pixels, sx, sy, sw, sh);
     if (upload == nullptr) {
+        g_frame_quads_skipped++;
+        g_frame_skip_upload++;
         return;
     }
 
     vdp1_cmdt_t *cmdt = cmdt_next();
     if (cmdt == nullptr) {
+        g_frame_quads_skipped++;
+        g_frame_skip_cmdt++;
         return;
     }
 
-    int16_vec2_t points[4];
-    for (int i = 0; i < 4; i++) {
-        points[i].x = (int16_t)vertices[i].x;
-        points[i].y = (int16_t)vertices[i].y;
-    }
-
-    vdp1_cmdt_distorted_sprite_set(cmdt);
     vdp1_cmdt_draw_mode_t mode = {};
     mode.color_mode = VDP1_CMDT_CM_CLUT_16;
     mode.trans_pixel_disable = false;
-    mode.pre_clipping_disable = true;
+    mode.pre_clipping_disable = false;
     if (a < 0.99f) {
         mode.cc_mode = VDP1_CMDT_CC_HALF_TRANSPARENT;
     }
-    vdp1_cmdt_draw_mode_set(cmdt, mode);
-    vdp1_cmdt_color_mode1_set(cmdt, reinterpret_cast<vdp1_vram_t>(tex.clut));
-    vdp1_cmdt_char_base_set(cmdt, reinterpret_cast<vdp1_vram_t>(upload->base));
-    vdp1_cmdt_char_size_set(cmdt, upload->slot_w, upload->sh);
 
-    vdp1_cmdt_char_flip_t flip = VDP1_CMDT_CHAR_FLIP_NONE;
-    if ((vertices[0].u > vertices[1].u) || (vertices[3].u > vertices[2].u)) {
-        flip = (vdp1_cmdt_char_flip_t)(flip | VDP1_CMDT_CHAR_FLIP_H);
+    const vdp1_cmdt_char_flip_t flip = quad_flip_get(quad);
+    if (!g_frame_sample_valid) {
+        g_frame_sample_valid = true;
+        g_frame_sample_x = round_to_i16(left);
+        g_frame_sample_y = round_to_i16(top);
+        g_frame_sample_w = round_to_i16(right - left);
+        g_frame_sample_h = round_to_i16(bottom - top);
+        g_frame_sample_sw = sw;
+        g_frame_sample_sh = sh;
     }
-    if ((vertices[0].v > vertices[3].v) || (vertices[1].v > vertices[2].v)) {
-        flip = (vdp1_cmdt_char_flip_t)(flip | VDP1_CMDT_CHAR_FLIP_V);
+    if (quad_is_axis_aligned(quad)) {
+        const int16_t x = round_to_i16(left);
+        const int16_t y = round_to_i16(top);
+        int16_t w = round_to_i16(right - left);
+        int16_t h = round_to_i16(bottom - top);
+        if (w <= 0) w = 1;
+        if (h <= 0) h = 1;
+
+        vdp1_cmdt_scaled_sprite_set(cmdt);
+        vdp1_cmdt_draw_mode_set(cmdt, mode);
+        vdp1_cmdt_color_mode1_set(cmdt, reinterpret_cast<vdp1_vram_t>(tex.clut));
+        vdp1_cmdt_char_base_set(cmdt, reinterpret_cast<vdp1_vram_t>(upload->base));
+        vdp1_cmdt_char_size_set(cmdt, upload->slot_w, upload->sh);
+        vdp1_cmdt_char_flip_set(cmdt, flip);
+        vdp1_cmdt_zoom_set(cmdt, VDP1_CMDT_ZOOM_POINT_UPPER_LEFT);
+        vdp1_cmdt_vtx_zoom_point_set(cmdt, INT16_VEC2_INITIALIZER(x, y));
+        vdp1_cmdt_vtx_zoom_display_set(cmdt, INT16_VEC2_INITIALIZER(w, h));
+        g_frame_quads_scaled++;
+    } else {
+        int16_vec2_t points[4];
+        for (int i = 0; i < 4; i++) {
+            points[i].x = round_to_i16(quad[i].x);
+            points[i].y = round_to_i16(quad[i].y);
+        }
+
+        vdp1_cmdt_distorted_sprite_set(cmdt);
+        vdp1_cmdt_draw_mode_set(cmdt, mode);
+        vdp1_cmdt_color_mode1_set(cmdt, reinterpret_cast<vdp1_vram_t>(tex.clut));
+        vdp1_cmdt_char_base_set(cmdt, reinterpret_cast<vdp1_vram_t>(upload->base));
+        vdp1_cmdt_char_size_set(cmdt, upload->slot_w, upload->sh);
+        vdp1_cmdt_char_flip_set(cmdt, flip);
+        vdp1_cmdt_vtx_set(cmdt, points);
+        g_frame_quads_distorted++;
     }
-    vdp1_cmdt_char_flip_set(cmdt, flip);
-    vdp1_cmdt_vtx_set(cmdt, points);
+    g_frame_quads_drawn++;
 
     (void)r;
     (void)g;
@@ -1310,6 +1815,8 @@ vg_saturn_draw_line(float x0, float y0, float x1, float y1,
     points[1].y = (int16_t)y1;
 
     vdp1_cmdt_line_set(cmdt);
+    vdp1_cmdt_draw_mode_t mode = {};
+    vdp1_cmdt_draw_mode_set(cmdt, mode);
     vdp1_cmdt_color_set(cmdt, rgb1555_from_float(r, g, b));
     vdp1_cmdt_vtx_set(cmdt, points);
 }

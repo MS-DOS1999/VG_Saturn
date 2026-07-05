@@ -32,6 +32,7 @@ static float g_color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
 static GLuint g_bound_texture;
 static char g_pending_texture_path[256];
 static bool g_frame_open;
+static bool g_texture_2d_enabled = true;
 
 static Mat3 *
 current_matrix(void)
@@ -105,8 +106,13 @@ emit_quad_if_ready(void)
         transform_to_screen(g_vertices[i], &out[i]);
     }
     ensure_frame_open();
-    vg_saturn_draw_textured_quad(g_bound_texture, out, g_color[0], g_color[1],
-                                 g_color[2], g_color[3]);
+    if (g_texture_2d_enabled) {
+        vg_saturn_draw_textured_quad(g_bound_texture, out, g_color[0],
+                                     g_color[1], g_color[2], g_color[3]);
+    } else {
+        vg_saturn_draw_solid_quad(out, g_color[0], g_color[1], g_color[2],
+                                  g_color[3]);
+    }
     g_vertex_count = 0;
 }
 
@@ -347,8 +353,21 @@ extern "C" void glClearColor(GLfloat r, GLfloat g, GLfloat b, GLfloat a)
     (void)r; (void)g; (void)b; (void)a;
 }
 
-extern "C" void glEnable(GLenum cap) { (void)cap; }
-extern "C" void glDisable(GLenum cap) { (void)cap; }
+extern "C" void
+glEnable(GLenum cap)
+{
+    if (cap == GL_TEXTURE_2D) {
+        g_texture_2d_enabled = true;
+    }
+}
+
+extern "C" void
+glDisable(GLenum cap)
+{
+    if (cap == GL_TEXTURE_2D) {
+        g_texture_2d_enabled = false;
+    }
+}
 extern "C" void glBlendFunc(GLenum sfactor, GLenum dfactor) { (void)sfactor; (void)dfactor; }
 extern "C" void glFogi(GLenum pname, GLint param) { (void)pname; (void)param; }
 extern "C" void glFogf(GLenum pname, GLfloat param) { (void)pname; (void)param; }
