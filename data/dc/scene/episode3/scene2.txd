@@ -1,0 +1,55 @@
+22
+1
+Data/hud/font1
+3
+Data/hud/arrow
+3
+Data/hud/fx64
+3
+Data/hud/messages
+1
+Data/hud/font3
+1
+Data/hud/font2
+3
+Data/hud/fx32
+3
+Data/sta2/hunt/bullet
+1
+Data/sta2/intro/castle
+3
+Data/sta2/hunt/gunend
+0
+Data/sta2/hunt/bg_forest_sky
+1
+Data/sta2/hunt/bg_forest
+3
+Data/sta2/hunt/bg_forest_front
+3
+Data/sta2/hunt/bg_forest_tree
+3
+Data/sta2/hunt/duck1
+3
+Data/sta2/intro/exp4
+0
+Data/hud/black
+0
+Data/hud/black
+0
+Data/hud/black
+0
+Data/hud/black
+0
+Data/hud/black
+0
+Data/hud/black
+
+
+
+
+
+// 0 = Standard
+// 1 = Special
+// 2 = Animation Standard
+// 3 = Animation Special
+// 4 = Animation Special No borders

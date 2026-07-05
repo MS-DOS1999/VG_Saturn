@@ -1,0 +1,43 @@
+4
+4
+
+1
+1
+1
+1
+
+0
+
+1
+
+2
+
+3
+
+0
+_
+_
+
+8
+We_need_more_wood_Sir!
+We_need_more_wood_Sir!
+
+1
+:_KILL_HIM_DAMN_IT!
+:_KILL_HIM_DAMN_IT!
+
+99
+$_(Kill_him)
+$_(Save_him)
+
+
+// No of text
+
+// Top line
+// Bottom line
+
+// & is for '
+// @ is for big block
+// & starts a new line
+// _ is needed for whitespace
+

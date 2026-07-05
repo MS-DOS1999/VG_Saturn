@@ -1,0 +1,6 @@
+#ifndef VG_SATURN_CSTDIO_COMPAT_H
+#define VG_SATURN_CSTDIO_COMPAT_H
+
+#include <stdio.h>
+
+#endif

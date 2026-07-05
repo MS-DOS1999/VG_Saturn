@@ -1,2 +1,9 @@
 /Emulators/
 /refs_dc_version/
+/build/
+/cd/
+/*.bin
+/*.cue
+/*.elf
+/*.iso
+/*.map

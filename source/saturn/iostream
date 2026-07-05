@@ -1,0 +1,20 @@
+#ifndef VG_SATURN_IOSTREAM_COMPAT_H
+#define VG_SATURN_IOSTREAM_COMPAT_H
+
+namespace std {
+
+class ostream {
+public:
+    template <typename T>
+    ostream &operator<<(const T &)
+    {
+        return *this;
+    }
+};
+
+static ostream cout;
+static const char endl = '\n';
+
+}
+
+#endif

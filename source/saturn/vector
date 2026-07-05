@@ -1,0 +1,56 @@
+#ifndef VG_SATURN_VECTOR_COMPAT_H
+#define VG_SATURN_VECTOR_COMPAT_H
+
+#include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
+
+namespace std {
+
+template <typename T>
+class vector {
+public:
+    vector() : items_(0), count_(0), capacity_(0) {}
+    ~vector() { free(items_); }
+
+    size_t size() const { return count_; }
+    bool empty() const { return count_ == 0; }
+    void clear() { count_ = 0; }
+
+    void push_back(const T &item)
+    {
+        if (count_ >= capacity_) {
+            reserve(capacity_ == 0 ? 4 : capacity_ * 2);
+        }
+        items_[count_++] = item;
+    }
+
+    T &operator[](size_t index) { return items_[index]; }
+    const T &operator[](size_t index) const { return items_[index]; }
+    T *data() { return items_; }
+    const T *data() const { return items_; }
+
+private:
+    void reserve(size_t new_capacity)
+    {
+        if (new_capacity <= capacity_) {
+            return;
+        }
+
+        T *new_items = (T *)malloc(sizeof(T) * new_capacity);
+        if (items_ != 0) {
+            memcpy(new_items, items_, sizeof(T) * count_);
+            free(items_);
+        }
+        items_ = new_items;
+        capacity_ = new_capacity;
+    }
+
+    T *items_;
+    size_t count_;
+    size_t capacity_;
+};
+
+}
+
+#endif
