@@ -1,0 +1,12 @@
+Starting Mednafen 1.32.1
+ Build information:
+   Compiled with gcc 13.3.0
+   Compiled against zlib 1.3, running with zlib 1.3(flags=0x000000a9)
+   Compiled against SDL 2.30.0(SDL-release-2.30.0-0-g859844eae (Ubuntu 2.30.0+dfsg-1ubuntu3.1)), running with SDL 2.30.0(SDL-release-2.30.0-0-g859844eae (Ubuntu 2.30.0+dfsg-1ubuntu3.1))
+   Running with libFLAC 1.4.3
+ Base directory: /tmp/mednafen-home
+ Emulation modules: apple2 nes snes gb gba pce lynx md pcfx ngp psx ss ssfplay vb wswan sms gg sasplay snes_faust pce_fast demo cdplay
+ Opening lockfile...
+ Loading settings from "/tmp/mednafen-home/mednafen.cfg"...
+  Loaded 0 valid settings and 0 unknown settings.
+Unrecognized argument: -ss
