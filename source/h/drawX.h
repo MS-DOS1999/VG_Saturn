@@ -3,6 +3,9 @@
 //#include <gl\gl.h>
 #endif
 #include "globals.h"
+#ifdef SATURN
+#include "saturn_profile.h"
+#endif
  
 void Z_Buffer(bool is_a_sprite);
 void Set_Values(float x, float y, float R, float G, float B, float A, float u, float v);
@@ -528,6 +531,9 @@ float Get_Texture_Coord(int id, int fx_id, int frame, bool is_a_sprite)
 
 void Z_Buffer(bool is_a_sprite)
 {
+#ifdef SATURN
+    VG_SATURN_PROFILE_SCOPE(VG_SATURN_PROFILE_BUCKET_ZBUFFER);
+#endif
     
     int temp=0;
     int temp1=0; 
@@ -546,153 +552,103 @@ void Z_Buffer(bool is_a_sprite)
                    
     memset(var3, 0, sizeof(var3) );               
     memset(sprite_list, 0, sizeof(sprite_list) ); 
-                        
-    for( int i=0;i<new_no_sprites;i++)
-	if(i >= 0 && i < TOTAL_NO_SPRITES)
-    {  
-        if(var5[i] < TOTAL_NO_SPRITES)  
-        { 
-			if(var5[i] >= 0 && var5[i] < 1000)
-				sprite_list[i] = sprite[var5[i]].priority; // in no order just adds the priority
-        } 
-        else 
-        {     
-			if( var5[i]-TOTAL_NO_SPRITES >= 0 && var5[i]-TOTAL_NO_SPRITES < TOTAL_NO_FX_SPRITES) 
-				sprite_list[i] = Fx[var5[i]-TOTAL_NO_SPRITES].priority; // in no order just adds the priority
-        }    
-             
-    }   
-        
-    // Set-up display order using calculated priority list
-    for(int i=0;i<new_no_sprites;i++)
-	if(i >= 0 && i < 1000)
-        if(sprite_list[i] == 6)
-        { 
-			if(i >= 0 && i < TOTAL_NO_SPRITES)
-			if(temp >= 0 && temp < TOTAL_NO_SPRITES)
-			{
-				var3[temp] = var5[i];
-				sprite_list[i] = -1;
-			}
-            temp++;
-        }
-           
-    // Set-up display order using calculated priority list
-    for(int i=0;i<new_no_sprites;i++)
-	if(i >= 0 && i < 1000)
-        if(sprite_list[i] == 5)  
-        {
-			if(i >= 0 && i < TOTAL_NO_SPRITES)
-			if(temp >= 0 && temp < TOTAL_NO_SPRITES)
-			{
-				var3[temp] = var5[i];
-				sprite_list[i] = -1;
-			}
-            temp++;
-        } 
-   
-    // Set-up display order using calculated priority list
-    for(int i=0;i<new_no_sprites;i++)
-	if(i >= 0 && i < 1000)
-        if(sprite_list[i] == 4)
-        {
-			if(i >= 0 && i < TOTAL_NO_SPRITES)
-			if(temp >= 0 && temp < TOTAL_NO_SPRITES)
-			{
-				var3[temp] = var5[i];
-				sprite_list[i] = -1;
-			}
-            temp++;
-        } 
- 
-    // Set-up display order using calculated priority list
-    for(int i=0;i<new_no_sprites;i++)
-	if(i >= 0 && i < 1000)
-        if(sprite_list[i] == 3)
-        {
-			if(i >= 0 && i < TOTAL_NO_SPRITES)
-			if(temp >= 0 && temp < TOTAL_NO_SPRITES)
-			{
-				var3[temp] = var5[i];
-				sprite_list[i] = -1;
-			}
-            temp++;
-        } 
-     
-    // Set-up display order using calculated priority list
+
+    struct RenderSortItem {
+        int index;
+        int priority;
+        int y;
+        int originalOrder;
+        int sortGroup;
+    };
+
+    static RenderSortItem items[TOTAL_NO_SPRITES];
+    int item_count = 0;
+
     for(int i=0;i<new_no_sprites;i++)
 	if(i >= 0 && i < TOTAL_NO_SPRITES)
     {
-        var2 = -1000;
-        temp1 = -1; 
-        temp2 = -1;
-            
-        for(int loop=0;loop<new_no_sprites;loop++)
-		if(loop >= 0 && loop < 1000)
-        if(sprite_list[loop] == 2)  
-        {
+        int priority = 0;
+        float sort_y = 0.0f;
+        bool valid = false;
 
-		  if(loop >= 0 && loop < TOTAL_NO_SPRITES)
-          if(var5[loop] >= 0 && var5[loop] < TOTAL_NO_SPRITES)                   
-          if(var2 < sprite[var5[loop]].y )
-          {
-            var2 = sprite[var5[loop]].y;    
-
-            temp1 = var5[loop]; 
-            temp2 = loop;       
-          } 
-		  if(loop >= 0 && loop < TOTAL_NO_SPRITES)
-          if(var5[loop] >= TOTAL_NO_SPRITES) 
-		  {	 
-			  if(var5[loop]-TOTAL_NO_SPRITES >= 0 && var5[loop]-TOTAL_NO_SPRITES < TOTAL_NO_FX_SPRITES)
-	          if(var2 < Fx[var5[loop]-TOTAL_NO_SPRITES].y) 
-   	          {
-   	   		      var2 = Fx[var5[loop]-TOTAL_NO_SPRITES].y;  
-
-   	        	  temp1 = var5[loop];  
-	              temp2 = loop;
-			  }  
-
-		  }    
-        
-        }
-        
-        if(temp >= 0 && temp < TOTAL_NO_SPRITES && temp1 >= 0)
-		if(temp2 >= 0 && temp2 < 1000)
+        if(var5[i] >= 0 && var5[i] < TOTAL_NO_SPRITES)
         {
-            var3[temp] = temp1; 
-            sprite_list[temp2] = -1;
-            temp++;         
+            priority = sprite[var5[i]].priority;
+            sort_y = sprite[var5[i]].y;
+            valid = true;
         }
-        
-    }  
-    // Set-up display order using calculated priority list
-    for(int i=0;i<new_no_sprites;i++)
-	if(i >= 0 && i < 1000)
-        if(sprite_list[i] == 1 && temp >= 0)
+        else
         {
-			if(i >= 0 && i < TOTAL_NO_SPRITES)
-			if(temp >= 0 && temp < TOTAL_NO_SPRITES)
-			{
-				var3[temp] = var5[i];
-				sprite_list[i] = -1;
-			}
-            temp++;       
+            const int fx_index = var5[i] - TOTAL_NO_SPRITES;
+            if(fx_index >= 0 && fx_index < TOTAL_NO_FX_SPRITES)
+            {
+                priority = Fx[fx_index].priority;
+                sort_y = Fx[fx_index].y;
+                valid = true;
+            }
         }
-    
-    // Set-up display order using calculated priority list
-    for(int i=0;i<new_no_sprites;i++)
-	if(i >= 0 && i < 1000)
-        if(sprite_list[i] == 0 && temp >= 0)
+
+        if(valid == true && item_count < TOTAL_NO_SPRITES)
         {
-			if(i >= 0 && i < TOTAL_NO_SPRITES)
-			if(temp >= 0 && temp < TOTAL_NO_SPRITES)
-			{
-				var3[temp] = var5[i];
-				sprite_list[i] = -1;
-			}
-            temp++;
+            int sortGroup = 7;
+            if(priority == 6) sortGroup = 0;
+            if(priority == 5) sortGroup = 1;
+            if(priority == 4) sortGroup = 2;
+            if(priority == 3) sortGroup = 3;
+            if(priority == 2) sortGroup = 4;
+            if(priority == 1) sortGroup = 5;
+            if(priority == 0) sortGroup = 6;
+
+            items[item_count].index = var5[i];
+            items[item_count].priority = priority;
+            items[item_count].y = (int)(sort_y * 100000.0f);
+            items[item_count].originalOrder = i;
+            items[item_count].sortGroup = sortGroup;
+            sprite_list[item_count] = priority;
+            item_count++;
         }
+    }
+
+    for(int i=1;i<item_count;i++)
+    {
+        RenderSortItem key = items[i];
+        int j = i - 1;
+        while(j >= 0)
+        {
+            bool move_prev = false;
+            if(key.sortGroup < items[j].sortGroup)
+            {
+                move_prev = true;
+            }
+            else if(key.sortGroup == items[j].sortGroup && key.priority == 2)
+            {
+                if(key.y > items[j].y)
+                {
+                    move_prev = true;
+                }
+                else if(key.y == items[j].y &&
+                        key.originalOrder < items[j].originalOrder)
+                {
+                    move_prev = true;
+                }
+            }
+
+            if(move_prev == false)
+            {
+                break;
+            }
+
+            items[j + 1] = items[j];
+            j--;
+        }
+        items[j + 1] = key;
+    }
+
+    for(int i=0;i<item_count;i++)
+    if(i >= 0 && i < TOTAL_NO_SPRITES)
+    {
+        var3[i] = items[i].index;
+    }
    
     } 
     

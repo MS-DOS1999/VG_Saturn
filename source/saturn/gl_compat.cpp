@@ -1,5 +1,6 @@
 #include "gl_dc.h"
 #include "saturn_platform.h"
+#include "saturn_profile.h"
 
 #include <math.h>
 #include <string.h>
@@ -153,6 +154,7 @@ glKosSwapBuffers(void)
 extern "C" void
 glViewport(GLint x, GLint y, GLsizei width, GLsizei height)
 {
+    VG_SATURN_PROFILE_SCOPE(VG_SATURN_PROFILE_BUCKET_GL_COMPAT);
     (void)x;
     (void)y;
     (void)width;
@@ -162,12 +164,14 @@ glViewport(GLint x, GLint y, GLsizei width, GLsizei height)
 extern "C" void
 glMatrixMode(GLenum mode)
 {
+    VG_SATURN_PROFILE_SCOPE(VG_SATURN_PROFILE_BUCKET_GL_COMPAT);
     g_matrix_mode = mode;
 }
 
 extern "C" void
 glLoadIdentity(void)
 {
+    VG_SATURN_PROFILE_SCOPE(VG_SATURN_PROFILE_BUCKET_GL_COMPAT);
     mat_identity(current_matrix());
 }
 
@@ -175,6 +179,7 @@ extern "C" void
 glOrtho(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top,
         GLdouble near_val, GLdouble far_val)
 {
+    VG_SATURN_PROFILE_SCOPE(VG_SATURN_PROFILE_BUCKET_GL_COMPAT);
     (void)near_val;
     (void)far_val;
 
@@ -190,6 +195,7 @@ glOrtho(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top,
 extern "C" void
 glPushMatrix(void)
 {
+    VG_SATURN_PROFILE_SCOPE(VG_SATURN_PROFILE_BUCKET_GL_COMPAT);
     if (g_matrix_mode == GL_PROJECTION) {
         if (g_projection_top < 16) {
             g_projection_stack[g_projection_top++] = g_projection;
@@ -202,6 +208,7 @@ glPushMatrix(void)
 extern "C" void
 glPopMatrix(void)
 {
+    VG_SATURN_PROFILE_SCOPE(VG_SATURN_PROFILE_BUCKET_GL_COMPAT);
     if (g_matrix_mode == GL_PROJECTION) {
         if (g_projection_top > 0) {
             g_projection = g_projection_stack[--g_projection_top];
@@ -214,6 +221,7 @@ glPopMatrix(void)
 extern "C" void
 glTranslatef(GLfloat x, GLfloat y, GLfloat z)
 {
+    VG_SATURN_PROFILE_SCOPE(VG_SATURN_PROFILE_BUCKET_GL_COMPAT);
     (void)z;
     Mat3 t;
     mat_identity(&t);
@@ -225,6 +233,7 @@ glTranslatef(GLfloat x, GLfloat y, GLfloat z)
 extern "C" void
 glScalef(GLfloat x, GLfloat y, GLfloat z)
 {
+    VG_SATURN_PROFILE_SCOPE(VG_SATURN_PROFILE_BUCKET_GL_COMPAT);
     (void)z;
     Mat3 s;
     mat_identity(&s);
@@ -236,6 +245,7 @@ glScalef(GLfloat x, GLfloat y, GLfloat z)
 extern "C" void
 glRotatef(GLfloat angle, GLfloat x, GLfloat y, GLfloat z)
 {
+    VG_SATURN_PROFILE_SCOPE(VG_SATURN_PROFILE_BUCKET_GL_COMPAT);
     (void)x;
     (void)y;
     (void)z;
@@ -255,6 +265,7 @@ glRotatef(GLfloat angle, GLfloat x, GLfloat y, GLfloat z)
 extern "C" void
 glBegin(GLenum mode)
 {
+    VG_SATURN_PROFILE_SCOPE(VG_SATURN_PROFILE_BUCKET_GL_COMPAT);
     g_begin_mode = mode;
     g_vertex_count = 0;
 }
@@ -262,6 +273,7 @@ glBegin(GLenum mode)
 extern "C" void
 glEnd(void)
 {
+    VG_SATURN_PROFILE_SCOPE(VG_SATURN_PROFILE_BUCKET_GL_COMPAT);
     emit_quad_if_ready();
     emit_line_if_ready();
     g_begin_mode = 0;
@@ -271,6 +283,7 @@ glEnd(void)
 extern "C" void
 glTexCoord2f(GLfloat s, GLfloat t)
 {
+    VG_SATURN_PROFILE_SCOPE(VG_SATURN_PROFILE_BUCKET_GL_COMPAT);
     g_current_u = s;
     g_current_v = t;
 }
@@ -300,6 +313,7 @@ glVertex2fv(const GLfloat *v)
 extern "C" void
 glVertex3f(GLfloat x, GLfloat y, GLfloat z)
 {
+    VG_SATURN_PROFILE_SCOPE(VG_SATURN_PROFILE_BUCKET_GL_COMPAT);
     if (g_vertex_count >= 8) {
         g_vertex_count = 0;
     }
@@ -326,6 +340,7 @@ glColor3f(GLfloat r, GLfloat g, GLfloat b)
 extern "C" void
 glColor4f(GLfloat r, GLfloat g, GLfloat b, GLfloat a)
 {
+    VG_SATURN_PROFILE_SCOPE(VG_SATURN_PROFILE_BUCKET_GL_COMPAT);
     g_color[0] = r;
     g_color[1] = g;
     g_color[2] = b;
@@ -335,6 +350,7 @@ glColor4f(GLfloat r, GLfloat g, GLfloat b, GLfloat a)
 extern "C" void
 glColor4fv(const GLfloat *v)
 {
+    VG_SATURN_PROFILE_SCOPE(VG_SATURN_PROFILE_BUCKET_GL_COMPAT);
     if (v != nullptr) {
         glColor4f(v[0], v[1], v[2], v[3]);
     }
@@ -343,6 +359,7 @@ glColor4fv(const GLfloat *v)
 extern "C" void
 glClear(GLbitfield mask)
 {
+    VG_SATURN_PROFILE_SCOPE(VG_SATURN_PROFILE_BUCKET_GL_COMPAT);
     (void)mask;
     vg_saturn_frame_begin();
     g_frame_open = true;
@@ -350,12 +367,14 @@ glClear(GLbitfield mask)
 
 extern "C" void glClearColor(GLfloat r, GLfloat g, GLfloat b, GLfloat a)
 {
+    VG_SATURN_PROFILE_SCOPE(VG_SATURN_PROFILE_BUCKET_GL_COMPAT);
     (void)r; (void)g; (void)b; (void)a;
 }
 
 extern "C" void
 glEnable(GLenum cap)
 {
+    VG_SATURN_PROFILE_SCOPE(VG_SATURN_PROFILE_BUCKET_GL_COMPAT);
     if (cap == GL_TEXTURE_2D) {
         g_texture_2d_enabled = true;
     }
@@ -364,6 +383,7 @@ glEnable(GLenum cap)
 extern "C" void
 glDisable(GLenum cap)
 {
+    VG_SATURN_PROFILE_SCOPE(VG_SATURN_PROFILE_BUCKET_GL_COMPAT);
     if (cap == GL_TEXTURE_2D) {
         g_texture_2d_enabled = false;
     }
@@ -381,6 +401,7 @@ extern "C" void glPointSize(GLfloat size) { (void)size; }
 extern "C" void
 glGenTextures(GLsizei n, GLuint *textures)
 {
+    VG_SATURN_PROFILE_SCOPE(VG_SATURN_PROFILE_BUCKET_GL_COMPAT);
     for (GLsizei i = 0; i < n; i++) {
         textures[i] = vg_saturn_texture_create(16, 16, nullptr);
     }
@@ -389,6 +410,7 @@ glGenTextures(GLsizei n, GLuint *textures)
 extern "C" void
 glDeleteTextures(GLsizei n, const GLuint *textures)
 {
+    VG_SATURN_PROFILE_SCOPE(VG_SATURN_PROFILE_BUCKET_GL_COMPAT);
     for (GLsizei i = 0; i < n; i++) {
         vg_saturn_texture_destroy(textures[i]);
     }
@@ -397,12 +419,14 @@ glDeleteTextures(GLsizei n, const GLuint *textures)
 extern "C" void
 glBindTexture(GLenum target, GLuint texture)
 {
+    VG_SATURN_PROFILE_SCOPE(VG_SATURN_PROFILE_BUCKET_GL_COMPAT);
     (void)target;
     g_bound_texture = texture;
 }
 
 extern "C" void glTexParameteri(GLenum target, GLenum pname, GLint param)
 {
+    VG_SATURN_PROFILE_SCOPE(VG_SATURN_PROFILE_BUCKET_GL_COMPAT);
     (void)target; (void)pname; (void)param;
 }
 
@@ -411,6 +435,7 @@ glTexImage2D(GLenum target, GLint level, GLint internalformat,
              GLsizei width, GLsizei height, GLint border, GLenum format,
              GLenum type, const GLvoid *pixels)
 {
+    VG_SATURN_PROFILE_SCOPE(VG_SATURN_PROFILE_BUCKET_GL_COMPAT);
     (void)target; (void)level; (void)internalformat; (void)border;
     (void)format; (void)type;
     if (g_pending_texture_path[0] != '\0') {
@@ -425,6 +450,7 @@ glCompressedTexImage2DARB(GLenum target, GLint level, GLenum internalformat,
                           GLsizei width, GLsizei height, GLint border,
                           GLsizei imageSize, const GLvoid *data)
 {
+    VG_SATURN_PROFILE_SCOPE(VG_SATURN_PROFILE_BUCKET_GL_COMPAT);
     (void)target; (void)level; (void)internalformat; (void)border; (void)imageSize;
     if (g_pending_texture_path[0] != '\0') {
         vg_saturn_texture_set_source_path(g_bound_texture, g_pending_texture_path);
@@ -452,6 +478,7 @@ glGetString(GLenum name)
 extern "C" void
 glSaturnSetTextureSourcePath(const char *path)
 {
+    VG_SATURN_PROFILE_SCOPE(VG_SATURN_PROFILE_BUCKET_GL_COMPAT);
     if (path == nullptr) {
         g_pending_texture_path[0] = '\0';
         return;

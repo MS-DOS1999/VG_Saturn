@@ -4,6 +4,9 @@
 #include "glad/glad.h"
 #endif
 #include "globals.h" 
+#ifdef SATURN
+#include "saturn_profile.h"
+#endif
 
 #ifdef XB1
 #include <vector>
@@ -74,6 +77,9 @@ void Set_Vertex_Buffer(int loop, int r, int g, int b, float alpha, bool is_a_spr
   
 int DrawGLScene(bool render_all, int f_rate)									// Here's Where We Do All The Drawing
 { 
+#ifdef SATURN
+	vg_saturn_profile_draw_scene_begin();
+#endif
 	//printf("ENTER DRAW GL\n");
 #ifdef SWITCH
 	IRenderStart();
@@ -260,6 +266,11 @@ int DrawGLScene(bool render_all, int f_rate)									// Here's Where We Do All T
         View_Cone(false); // For Fx...
             
     rendering = new_no_sprites;
+#ifdef SATURN
+    vg_saturn_profile_set_render_counts((uint32_t)no_sprites +
+                                        (mode ? 0U : (uint32_t)no_fx),
+                                        (uint32_t)new_no_sprites);
+#endif
 #if defined SWITCH || defined DREAMCAST
 	if(RENDERER == RENDER_OPENGL) 
 	{
@@ -535,6 +546,9 @@ int DrawGLScene(bool render_all, int f_rate)									// Here's Where We Do All T
 	glKosSwapBuffers();
 #endif
 
+#ifdef SATURN
+	vg_saturn_profile_draw_scene_end();
+#endif
 	return true;										// Everything Went OK
 }
 
@@ -669,6 +683,12 @@ void View_Cone(bool is_a_sprite)
      cx2 += off_set;
      cy1 -= off_set;
      cy2 += off_set;
+#if defined(SATURN)
+     cx1 -= 0.25f;
+     cx2 += 0.25f;
+     cy1 -= 0.25f;
+     cy2 += 0.25f;
+#endif
          
      for(int loop=0;loop<index;loop++)  
      {
@@ -704,10 +724,8 @@ void View_Cone(bool is_a_sprite)
                       
          } 
                   
-         if(( x1 < cx2 )
-         &&( x1 > cx1 )                        
-         &&( y2 < cy2 )
-         &&( y2 > cy1))
+         if((x2 >= cx1) && (x1 <= cx2) &&
+            (y2 >= cy1) && (y1 <= cy2))
          {
              keep_in = true;
          } 
@@ -775,8 +793,18 @@ void View_Cone(bool is_a_sprite)
              keep_in = true;      
          }  
 
-		 // Hack...
+		 // Non-Saturn builds historically kept every renderable in view.
+#if !defined(SATURN)
 		 keep_in = true;
+#endif
+#if defined(SATURN)
+         if(is_a_sprite == true && loop >= 0 && loop < TOTAL_NO_SPRITES &&
+            sprite[loop].priority >= 6)
+             keep_in = true;
+         if(is_a_sprite == false && loop >= 0 && loop < TOTAL_NO_FX_SPRITES &&
+            Fx[loop].priority >= 6)
+             keep_in = true;
+#endif
                                      
          if(keep_in == true)       
          {  
@@ -1081,6 +1109,9 @@ void Draw_Hud(int index)
     if(game_mode != NORM && (game_mode == WALK || game_mode == WORLD || game_mode == CINE || game_mode == FRONT)) // Draw the hand of god
     if(hud[index].alpha != 0.0 || mode)
     {   
+#ifdef SATURN
+            VG_SATURN_PROFILE_COUNT_HUD_SPRITE();
+#endif
                        
             display = hud[index];    
                            
@@ -1659,6 +1690,9 @@ void Draw_New_Font(int i)
 
 	display_font = new_counter[i]; 
 	 
+	if(display_font.word[0] == '\0' || display_font.alpha <= 0.0f)
+		return;
+
 	display_font.width = 0.05f;
 	display_font.height = 0.05f;
 
@@ -1724,6 +1758,9 @@ void Draw_New_Font(int i)
 
         if(display_font.alpha != 0.0f) 
         {
+#ifdef SATURN
+            VG_SATURN_PROFILE_COUNT_FONT_GLYPH();
+#endif
 			#if IS_USING_DIRECTX == 1  
 			    if(RENDERER == RENDER_DIRECTX) 
 				{ 
@@ -2052,6 +2089,9 @@ void Draw_Font(int i)
         if(game_mode == GAME || game_mode == WALK || (game_mode == FRONT) || (game_mode == WORLD))
             display_font = counter[i];
         
+    if(display_font.word[0] == '\0' || (display_font.alpha <= 0.0f && !mode))
+        return;
+
     addX = 0.0f;
     Yamount = 0.0f;
     
@@ -2168,6 +2208,9 @@ void Draw_Font(int i)
         
         if(display_font.alpha != 0.0f)
         {
+#ifdef SATURN
+            VG_SATURN_PROFILE_COUNT_FONT_GLYPH();
+#endif
 
 			#if IS_USING_DIRECTX == 1  
 			    if(RENDERER == RENDER_DIRECTX) 

@@ -8,6 +8,24 @@ include $(YAUL_INSTALL_ROOT)/share/build.pre.mk
 
 BUILTIN_ASSETS=
 VG_EXTRA_FLAGS ?=
+VG_BUILD ?= release
+
+ifeq ($(VG_BUILD),debug)
+  VG_OPT_FLAGS ?= -O0 -g
+  VG_DEBUG_MODE ?= 1
+  VG_SATURN_PROFILE ?= 0
+else ifeq ($(VG_BUILD),profile)
+  VG_OPT_FLAGS ?= -Os -g
+  VG_DEBUG_MODE ?= 0
+  VG_SATURN_PROFILE ?= 1
+else
+  VG_OPT_FLAGS ?= -Os -DNDEBUG
+  VG_DEBUG_MODE ?= 0
+  VG_SATURN_PROFILE ?= 0
+endif
+
+VG_SATURN_DEBUG_LOG ?= 0
+SH_BUILD_DIR := build/$(VG_BUILD)
 
 SH_PROGRAM:= verdict_guilty_saturn
 SH_SRCS:= \
@@ -22,18 +40,21 @@ SH_SRCS:= \
 	source/saturn/libc_compat.cpp \
 	source/saturn/saturn_memory.cpp \
 	source/saturn/saturn_debug.cpp \
+	source/saturn/saturn_fastdraw.cpp \
+	source/saturn/saturn_profile.cpp \
 	source/saturn/saturn_platform.cpp
 
 VG_COMMON_FLAGS:= \
-	-Os \
-	-g \
+	$(VG_OPT_FLAGS) \
 	-Isource/saturn \
 	-Isource/h \
 	-Isource/dc \
 	-include source/saturn/saturn_compat.h \
 	-DSATURN \
 	-DDREAMCAST \
-	-DDEBUG_MODE=1 \
+	-DDEBUG_MODE=$(VG_DEBUG_MODE) \
+	-DVG_SATURN_PROFILE=$(VG_SATURN_PROFILE) \
+	-DVG_SATURN_DEBUG_LOG=$(VG_SATURN_DEBUG_LOG) \
 	-Wno-unused \
 	-Wno-unused-parameter \
 	-Wno-unused-variable \

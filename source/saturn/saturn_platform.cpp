@@ -1,5 +1,6 @@
 #include "saturn_platform.h"
 #include "saturn_debug.h"
+#include "saturn_profile.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,6 +17,12 @@ static constexpr uint32_t kMaxCacheSlots = 256;
 static constexpr uint32_t kCartObjectPoolBytes = 0x00110000;
 static constexpr bool kDebugDrawVdp1Marker = false;
 static constexpr bool kDebugUseDefaultVdp1Layout = false;
+
+#if VG_SATURN_DEBUG_LOG
+#define VG_SATURN_DEBUG_DBGP(...) dbgio_printf(__VA_ARGS__)
+#else
+#define VG_SATURN_DEBUG_DBGP(...) ((void)0)
+#endif
 
 struct SaturnTexture {
     uint16_t width;
@@ -39,16 +46,24 @@ struct CacheSlot {
     bool used;
 };
 
-struct FrameUpload {
-    uint8_t *base;
-    uint32_t bytes;
+struct Vdp1FrameKey {
     GLuint texture;
     uint16_t sx;
     uint16_t sy;
     uint16_t sw;
     uint16_t sh;
+};
+
+struct Vdp1FrameSlot {
+    Vdp1FrameKey key;
+    uint8_t *base;
+    uint32_t bytes;
+    uint32_t capacity;
     uint16_t slot_w;
+    uint16_t slot_h;
+    uint32_t last_used_frame;
     bool used;
+    bool touched_this_frame;
 };
 
 struct OrderedQuadVertex {
@@ -71,8 +86,13 @@ static uint32_t g_cmdt_index;
 static uint8_t *g_frame_vram_base;
 static uint8_t *g_frame_vram_cursor;
 static uint8_t *g_frame_vram_end;
-static FrameUpload g_frame_uploads[kFrameUploadMax];
+static Vdp1FrameSlot g_frame_slots[kFrameUploadMax];
+static uint32_t g_frame_slot_count;
 static uint32_t g_frame_upload_count;
+static uint32_t g_frame_upload_bytes;
+static uint32_t g_frame_cache_hits;
+static uint32_t g_frame_cache_misses;
+static uint32_t g_frame_cache_evictions;
 static SaturnTexture g_textures[kMaxTextures];
 static CacheSlot g_cache_slots[kMaxCacheSlots];
 static uint32_t g_cache_slot_count;
@@ -150,6 +170,8 @@ static uint8_t g_placeholder_pixels[(16 * 16) / 2];
 static uint16_t g_placeholder_palette[16];
 
 static vdp1_cmdt_t *cmdt_next(void);
+static void frame_cache_reset_all(void);
+static void frame_cache_evict_texture(GLuint texture);
 static void debug_draw_log(const char *kind, GLuint input_texture,
                            GLuint final_texture, const SaturnTexture *tex,
                            uint16_t sx, uint16_t sy, uint16_t sw,
@@ -328,6 +350,7 @@ debug_draw_log(const char *kind, GLuint input_texture, GLuint final_texture,
                const SaturnTexture *tex, uint16_t sx, uint16_t sy,
                uint16_t sw, uint16_t sh)
 {
+#if VG_SATURN_DEBUG_LOG
     if (g_debug_passed_first_frame || (g_frame_debug_draw_logs >= 8)) {
         return;
     }
@@ -344,6 +367,16 @@ debug_draw_log(const char *kind, GLuint input_texture, GLuint final_texture,
              (uint32_t)sx, (uint32_t)sy, (uint32_t)sw, (uint32_t)sh,
              (tex != nullptr && tex->path[0] != '\0') ? tex->path : "-");
     vg_saturn_debug_puts(buffer);
+#else
+    (void)kind;
+    (void)input_texture;
+    (void)final_texture;
+    (void)tex;
+    (void)sx;
+    (void)sy;
+    (void)sw;
+    (void)sh;
+#endif
 }
 
 static void
@@ -617,10 +650,55 @@ cmdt_next(void)
 static void
 frame_uploads_reset(void)
 {
+    g_frame_upload_count = 0;
+    g_frame_upload_bytes = 0;
+    g_frame_cache_hits = 0;
+    g_frame_cache_misses = 0;
+    g_frame_cache_evictions = 0;
+    g_debug_last_upload_bytes = 0;
+    for (uint32_t i = 0; i < g_frame_slot_count; i++) {
+        g_frame_slots[i].touched_this_frame = false;
+    }
+}
+
+static void
+frame_cache_reset_all(void)
+{
+    memset(g_frame_slots, 0, sizeof(g_frame_slots));
+    g_frame_slot_count = 0;
     g_frame_vram_cursor = g_frame_vram_base;
     g_frame_upload_count = 0;
+    g_frame_upload_bytes = 0;
+    g_frame_cache_hits = 0;
+    g_frame_cache_misses = 0;
+    g_frame_cache_evictions = 0;
     g_debug_last_upload_bytes = 0;
-    memset(g_frame_uploads, 0, sizeof(g_frame_uploads));
+}
+
+static bool
+frame_key_equal(const Vdp1FrameKey &left, const Vdp1FrameKey &right)
+{
+    return (left.texture == right.texture) &&
+           (left.sx == right.sx) &&
+           (left.sy == right.sy) &&
+           (left.sw == right.sw) &&
+           (left.sh == right.sh);
+}
+
+static void
+frame_cache_evict_texture(GLuint texture)
+{
+    if (texture == 0) {
+        return;
+    }
+
+    for (uint32_t i = 0; i < g_frame_slot_count; i++) {
+        Vdp1FrameSlot &slot = g_frame_slots[i];
+        if (slot.used && (slot.key.texture == texture)) {
+            slot.used = false;
+            slot.touched_this_frame = false;
+        }
+    }
 }
 
 static void
@@ -687,6 +765,8 @@ texture_evict(GLuint texture)
     if (texture >= kMaxTextures) {
         return;
     }
+
+    frame_cache_evict_texture(texture);
 
     SaturnTexture &tex = g_textures[texture];
     if ((tex.cache_slot >= 0) && ((uint32_t)tex.cache_slot < g_cache_slot_count)) {
@@ -815,8 +895,8 @@ texture_upload_from_memory(GLuint texture, const uint8_t *data, uint32_t data_si
     const int slot_index = cache_slot_acquire(texture, payload_bytes);
     if (slot_index < 0) {
         if (!tex.warned) {
-            dbgio_printf("No ext RAM slot for tex %lu (%lu bytes)\n",
-                         texture, payload_bytes);
+            VG_SATURN_DEBUG_DBGP("No ext RAM slot for tex %lu (%lu bytes)\n",
+                                 texture, payload_bytes);
             tex.warned = true;
         }
         tex.resident = false;
@@ -844,8 +924,12 @@ texture_load_from_cd(GLuint texture)
         return false;
     }
 
+#if VG_SATURN_DEBUG_LOG
     const bool debug_this_read = (g_debug_texture_cd_attempt_count < 96);
     g_debug_texture_cd_attempt_count++;
+#else
+    const bool debug_this_read = false;
+#endif
     if (debug_this_read) {
         vg_saturn_debug_stage(733, "texture_cd_before_read");
         vg_saturn_debug_puts("[TEX] ");
@@ -859,7 +943,7 @@ texture_load_from_cd(GLuint texture)
             vg_saturn_debug_stage(732, "texture_cd_find_failed");
         }
         if (!tex.warned) {
-            dbgio_printf("Texture CD open failed: %s\n", tex.path);
+            VG_SATURN_DEBUG_DBGP("Texture CD open failed: %s\n", tex.path);
             tex.warned = true;
         }
         return false;
@@ -879,7 +963,7 @@ texture_load_from_cd(GLuint texture)
             vg_saturn_debug_stage(732, "texture_cd_first_read_failed");
         }
         if (!tex.warned) {
-            dbgio_printf("Texture CD first sector failed: %s\n", tex.path);
+            VG_SATURN_DEBUG_DBGP("Texture CD first sector failed: %s\n", tex.path);
             tex.warned = true;
         }
         return false;
@@ -894,7 +978,7 @@ texture_load_from_cd(GLuint texture)
     const uint32_t palette_bytes = sizeof(uint16_t) * 16;
     if (file_size < (header_bytes + palette_bytes)) {
         if (!tex.warned) {
-            dbgio_printf("Texture CD header invalid: %s\n", tex.path);
+            VG_SATURN_DEBUG_DBGP("Texture CD header invalid: %s\n", tex.path);
             tex.warned = true;
         }
         return false;
@@ -910,7 +994,7 @@ texture_load_from_cd(GLuint texture)
         (header.data_size == 0) || 
         ((header_bytes + palette_bytes + header.data_size) > file_size)) {
         if (!tex.warned) {
-            dbgio_printf("Texture CD header invalid: %s\n", tex.path);
+            VG_SATURN_DEBUG_DBGP("Texture CD header invalid: %s\n", tex.path);
             tex.warned = true;
         }
         return false;
@@ -920,7 +1004,7 @@ texture_load_from_cd(GLuint texture)
     const uint32_t rounded_size = sector_count * CDFS_SECTOR_SIZE;
     if ((g_cache_size == 0) || (rounded_size > g_cache_size)) {
         if (!tex.warned) {
-            dbgio_printf("Texture too large for ext slot: %s\n", tex.path);
+            VG_SATURN_DEBUG_DBGP("Texture too large for ext slot: %s\n", tex.path);
             tex.warned = true;
         }
         return false;
@@ -929,7 +1013,7 @@ texture_load_from_cd(GLuint texture)
     const int slot_index = cache_slot_acquire(texture, rounded_size);
     if (slot_index < 0) {
         if (!tex.warned) {
-            dbgio_printf("No ext RAM slot for: %s\n", tex.path);
+            VG_SATURN_DEBUG_DBGP("No ext RAM slot for: %s\n", tex.path);
             tex.warned = true;
         }
         return false;
@@ -940,7 +1024,7 @@ texture_load_from_cd(GLuint texture)
     if (!cd_read_entry_to(&entry, slot.base, rounded_size, &loaded_size)) {
         texture_evict(texture);
         if (!tex.warned) {
-            dbgio_printf("Texture CD slot read failed: %s\n", tex.path);
+            VG_SATURN_DEBUG_DBGP("Texture CD slot read failed: %s\n", tex.path);
             tex.warned = true;
         }
         return false;
@@ -1002,55 +1086,80 @@ source_texel_get(const uint8_t *pixels, uint16_t texture_width, uint16_t x,
     return (x & 1U) ? (value & 0x0FU) : (value >> 4);
 }
 
-static FrameUpload *
-frame_upload_get(GLuint texture, const uint8_t *pixels, uint16_t sx,
-                 uint16_t sy, uint16_t sw, uint16_t sh)
+static Vdp1FrameSlot *
+frame_slot_lru_find(uint32_t bytes)
 {
-    SaturnTexture &tex = g_textures[texture];
-    for (uint32_t i = 0; i < g_frame_upload_count; i++) {
-        FrameUpload &upload = g_frame_uploads[i];
-        if (upload.used && (upload.texture == texture) && (upload.sx == sx) &&
-            (upload.sy == sy) && (upload.sw == sw) && (upload.sh == sh)) {
-            return &upload;
+    Vdp1FrameSlot *candidate = nullptr;
+    for (uint32_t i = 0; i < g_frame_slot_count; i++) {
+        Vdp1FrameSlot &slot = g_frame_slots[i];
+        if (!slot.used || slot.touched_this_frame || (slot.capacity < bytes)) {
+            continue;
+        }
+        if ((candidate == nullptr) ||
+            (slot.last_used_frame < candidate->last_used_frame)) {
+            candidate = &slot;
+        }
+    }
+    return candidate;
+}
+
+static Vdp1FrameSlot *
+frame_slot_alloc(uint32_t bytes)
+{
+    for (uint32_t i = 0; i < g_frame_slot_count; i++) {
+        Vdp1FrameSlot &slot = g_frame_slots[i];
+        if (!slot.used && (slot.capacity >= bytes)) {
+            return &slot;
         }
     }
 
-    if (g_frame_upload_count >= kFrameUploadMax) {
-        if (!tex.warned) {
-            dbgio_printf("VDP1 frame upload table full\n");
-            tex.warned = true;
-        }
-        return nullptr;
+    if ((g_frame_slot_count < kFrameUploadMax) &&
+        ((g_frame_vram_cursor + bytes) <= g_frame_vram_end)) {
+        Vdp1FrameSlot &slot = g_frame_slots[g_frame_slot_count++];
+        slot.base = g_frame_vram_cursor;
+        slot.capacity = bytes;
+        g_frame_vram_cursor += bytes;
+        return &slot;
     }
 
-    const uint16_t slot_w = align8_u16(sw);
-    const uint32_t row_bytes = slot_w >> 1;
-    const uint32_t bytes = (row_bytes * sh + 7U) & ~7U;
-    if ((bytes == 0) || ((g_frame_vram_cursor + bytes) > g_frame_vram_end)) {
-        if (!tex.warned) {
-            dbgio_printf("VDP1 frame VRAM full (%lux%lu)\n",
-                         (uint32_t)sw, (uint32_t)sh);
-            tex.warned = true;
-        }
-        return nullptr;
+    Vdp1FrameSlot *slot = frame_slot_lru_find(bytes);
+    if (slot != nullptr) {
+        slot->used = false;
+        slot->touched_this_frame = false;
+        g_frame_cache_evictions++;
     }
+    return slot;
+}
 
-    FrameUpload &upload = g_frame_uploads[g_frame_upload_count++];
-    upload.base = g_frame_vram_cursor;
-    upload.bytes = bytes;
-    upload.texture = texture;
-    upload.sx = sx;
-    upload.sy = sy;
-    upload.sw = sw;
-    upload.sh = sh;
-    upload.slot_w = slot_w;
-    upload.used = true;
-    g_frame_vram_cursor += bytes;
-    g_debug_last_upload_bytes += bytes;
+static void
+frame_slot_copy_pixels(Vdp1FrameSlot &slot, const SaturnTexture &tex,
+                       const uint8_t *pixels)
+{
+    const uint32_t dst_row_bytes = slot.slot_w >> 1;
+    const uint32_t src_stride = ((uint32_t)tex.width + 1U) >> 1;
+    const uint16_t sx = slot.key.sx;
+    const uint16_t sy = slot.key.sy;
+    const uint16_t sw = slot.key.sw;
+    const uint16_t sh = slot.key.sh;
+
+    if (((sx & 1U) == 0U) && ((sw & 1U) == 0U)) {
+        const uint32_t copy_bytes = sw >> 1;
+        const uint32_t pad_bytes = dst_row_bytes - copy_bytes;
+        for (uint16_t y = 0; y < sh; y++) {
+            uint8_t *dst = slot.base + ((uint32_t)y * dst_row_bytes);
+            const uint8_t *src =
+                pixels + ((uint32_t)(sy + y) * src_stride) + (sx >> 1);
+            memcpy(dst, src, copy_bytes);
+            if (pad_bytes > 0) {
+                memset(dst + copy_bytes, 0, pad_bytes);
+            }
+        }
+        return;
+    }
 
     for (uint16_t y = 0; y < sh; y++) {
-        uint8_t *dst = upload.base + ((uint32_t)y * row_bytes);
-        for (uint16_t x = 0; x < slot_w; x += 2) {
+        uint8_t *dst = slot.base + ((uint32_t)y * dst_row_bytes);
+        for (uint16_t x = 0; x < slot.slot_w; x += 2) {
             uint8_t a = 0;
             uint8_t b = 0;
             if (x < sw) {
@@ -1064,8 +1173,56 @@ frame_upload_get(GLuint texture, const uint8_t *pixels, uint16_t sx,
             dst[x >> 1] = (uint8_t)((a << 4) | b);
         }
     }
+}
 
-    return &upload;
+static const Vdp1FrameSlot *
+sprite_frame_get_or_upload(GLuint texture, const uint8_t *pixels, uint16_t sx,
+                           uint16_t sy, uint16_t sw, uint16_t sh)
+{
+    SaturnTexture &tex = g_textures[texture];
+    const Vdp1FrameKey key = {texture, sx, sy, sw, sh};
+    for (uint32_t i = 0; i < g_frame_slot_count; i++) {
+        Vdp1FrameSlot &slot = g_frame_slots[i];
+        if (slot.used && frame_key_equal(slot.key, key)) {
+            slot.last_used_frame = (uint32_t)g_frame_count;
+            slot.touched_this_frame = true;
+            g_frame_cache_hits++;
+            return &slot;
+        }
+    }
+
+    const uint16_t slot_w = align8_u16(sw);
+    const uint32_t row_bytes = slot_w >> 1;
+    const uint32_t bytes = (row_bytes * sh + 7U) & ~7U;
+    if (bytes == 0) {
+        return nullptr;
+    }
+
+    Vdp1FrameSlot *slot = frame_slot_alloc(bytes);
+    if (slot == nullptr) {
+        if (!tex.warned) {
+            VG_SATURN_DEBUG_DBGP("VDP1 frame cache full (%lux%lu)\n",
+                                 (uint32_t)sw, (uint32_t)sh);
+            tex.warned = true;
+        }
+        return nullptr;
+    }
+
+    slot->key = key;
+    slot->bytes = bytes;
+    slot->slot_w = slot_w;
+    slot->slot_h = sh;
+    slot->last_used_frame = (uint32_t)g_frame_count;
+    slot->used = true;
+    slot->touched_this_frame = true;
+
+    frame_slot_copy_pixels(*slot, tex, pixels);
+    g_frame_upload_count++;
+    g_frame_upload_bytes += bytes;
+    g_debug_last_upload_bytes += bytes;
+    g_frame_cache_misses++;
+
+    return slot;
 }
 
 static GLuint
@@ -1145,28 +1302,36 @@ vg_saturn_init(void)
     vdp1_vram_partitions_get(&g_vdp1_parts);
     g_frame_vram_base = static_cast<uint8_t *>(g_vdp1_parts.texture_base);
     g_frame_vram_end = g_frame_vram_base + g_vdp1_parts.texture_size;
+    memset(g_frame_vram_base, 0, g_vdp1_parts.texture_size);
     memset(g_textures, 0, sizeof(g_textures));
     for (uint32_t i = 0; i < kMaxTextures; i++) {
         g_textures[i].cache_slot = -1;
     }
-    frame_uploads_reset();
+    frame_cache_reset_all();
     cache_init();
 
     g_cmdt_list = vdp1_cmdt_list_alloc(kMaxCmdts);
     cmdt_header_set();
 
     dbgio_init();
+#if VG_SATURN_PROFILE || VG_SATURN_DEBUG_LOG
+    dbgio_dev_default_init(DBGIO_DEV_MEDNAFEN_DEBUG);
+#else
     dbgio_dev_default_init(DBGIO_DEV_NULL);
+#endif
+    vg_saturn_profile_init();
     for (uint32_t i = 0; i < 8; i++) {
         vdp2_sprite_priority_set(i, 6);
     }
+#if VG_SATURN_DEBUG_LOG
     if (g_warned_no_cart) {
-        dbgio_printf("4MB RAM cart missing; sprite streaming disabled\n");
+        VG_SATURN_DEBUG_DBGP("4MB RAM cart missing; sprite streaming disabled\n");
         vg_saturn_debug_stage(19, "platform_init_no_cart");
     } else {
-        dbgio_printf("Ext RAM cache slots: %lu\n", g_cache_slot_count);
+        VG_SATURN_DEBUG_DBGP("Ext RAM cache slots: %lu\n", g_cache_slot_count);
         vg_saturn_debug_stage(18, "platform_init_cart_ok");
     }
+#endif
 
     vdp2_sync();
     vdp2_sync_wait();
@@ -1343,11 +1508,29 @@ vg_saturn_frame_end(void)
     g_debug_sample_sw = g_frame_sample_sw;
     g_debug_sample_sh = g_frame_sample_sh;
 
+    vg_saturn_profile_backend_ready(g_frame_count, g_debug_last_cmdts,
+                                    g_debug_last_quads_in,
+                                    g_debug_last_quads_drawn,
+                                    g_debug_last_quads_skipped,
+                                    g_debug_last_uploads,
+                                    g_debug_last_upload_bytes,
+                                    g_frame_cache_hits,
+                                    g_frame_cache_misses,
+                                    g_frame_cache_evictions);
+
     vdp1_sync_cmdt_list_put(g_cmdt_list, 0);
     vdp1_sync_render();
     vdp1_sync();
+#if VG_SATURN_PROFILE
+    const uint16_t vdp1_wait_start = vg_saturn_profile_now();
+#endif
     vdp1_sync_wait();
+#if VG_SATURN_PROFILE
+    vg_saturn_profile_vdp1_wait_add(
+        vg_saturn_profile_elapsed(vdp1_wait_start));
+#endif
 
+#if VG_SATURN_DEBUG_LOG
     volatile vdp1_ioregs_t * const vdp1_ioregs =
         (volatile vdp1_ioregs_t *)VDP1_IOREG_BASE;
     g_debug_vdp1_edsr = vdp1_ioregs->edsr;
@@ -1446,8 +1629,16 @@ vg_saturn_frame_end(void)
                                   g_debug_vdp2_prisc,
                                   g_debug_vdp2_prisd);
     }
+#endif
     vdp2_sync();
+#if VG_SATURN_PROFILE
+    const uint16_t vblank_wait_start = vg_saturn_profile_now();
+#endif
     vdp2_sync_wait();
+#if VG_SATURN_PROFILE
+    vg_saturn_profile_vblank_wait_add(
+        vg_saturn_profile_elapsed(vblank_wait_start));
+#endif
 }
 
 uint64_t
@@ -1521,6 +1712,7 @@ void
 vg_saturn_texture_cache_reset(void)
 {
     cache_reset_all();
+    frame_cache_reset_all();
 }
 
 void
@@ -1559,6 +1751,7 @@ vg_saturn_texture_replace(GLuint texture, GLsizei width, GLsizei height,
 
     tex.width = (uint16_t)width;
     tex.height = (uint16_t)height;
+    frame_cache_evict_texture(texture);
 
     if (tex.skipped) {
         texture_evict(texture);
@@ -1722,7 +1915,8 @@ vg_saturn_draw_textured_quad(GLuint texture, const vg_saturn_vertex_t *vertices,
     const uint16_t sw = (uint16_t)(ex - sx);
     const uint16_t sh = (uint16_t)(ey - sy);
     debug_draw_log("tex", input_texture, texture, &tex, sx, sy, sw, sh);
-    FrameUpload *upload = frame_upload_get(texture, pixels, sx, sy, sw, sh);
+    const Vdp1FrameSlot *upload =
+        sprite_frame_get_or_upload(texture, pixels, sx, sy, sw, sh);
     if (upload == nullptr) {
         g_frame_quads_skipped++;
         g_frame_skip_upload++;
@@ -1766,7 +1960,7 @@ vg_saturn_draw_textured_quad(GLuint texture, const vg_saturn_vertex_t *vertices,
         vdp1_cmdt_draw_mode_set(cmdt, mode);
         vdp1_cmdt_color_mode1_set(cmdt, reinterpret_cast<vdp1_vram_t>(tex.clut));
         vdp1_cmdt_char_base_set(cmdt, reinterpret_cast<vdp1_vram_t>(upload->base));
-        vdp1_cmdt_char_size_set(cmdt, upload->slot_w, upload->sh);
+        vdp1_cmdt_char_size_set(cmdt, upload->slot_w, upload->slot_h);
         vdp1_cmdt_char_flip_set(cmdt, flip);
         vdp1_cmdt_zoom_set(cmdt, VDP1_CMDT_ZOOM_POINT_UPPER_LEFT);
         vdp1_cmdt_vtx_zoom_point_set(cmdt, INT16_VEC2_INITIALIZER(x, y));
@@ -1783,7 +1977,7 @@ vg_saturn_draw_textured_quad(GLuint texture, const vg_saturn_vertex_t *vertices,
         vdp1_cmdt_draw_mode_set(cmdt, mode);
         vdp1_cmdt_color_mode1_set(cmdt, reinterpret_cast<vdp1_vram_t>(tex.clut));
         vdp1_cmdt_char_base_set(cmdt, reinterpret_cast<vdp1_vram_t>(upload->base));
-        vdp1_cmdt_char_size_set(cmdt, upload->slot_w, upload->sh);
+        vdp1_cmdt_char_size_set(cmdt, upload->slot_w, upload->slot_h);
         vdp1_cmdt_char_flip_set(cmdt, flip);
         vdp1_cmdt_vtx_set(cmdt, points);
         g_frame_quads_distorted++;

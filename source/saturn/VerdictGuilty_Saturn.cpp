@@ -11,7 +11,9 @@
 #define WIN32_LEAN_AND_MEAN                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 
 #define WIN32_EXTRA_LEAN                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               
-#define DEBUG_MODE  1  // 0 == ON   // 1 == OFF                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      
+#ifndef DEBUG_MODE
+#define DEBUG_MODE  1  // 0 == ON   // 1 == OFF
+#endif
 #define DEMO_MODE   1  // 0 == ON   // 1 == OFF                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           
                                                                                                                                                                                                                                                                                                                                                                                                                                 
 #define QUICK_LOAD  0  // 1 == ON   // 0 == OFF                                                                                                                                                                                                                                                                                                                                                 
@@ -392,6 +394,7 @@ bool continueWithoutSaving = false;
 static void
 SaturnDebugGameState(void)
 {
+#if VG_SATURN_DEBUG_LOG
 	static int next_state_log = 0;
 	const int now = (int)TimerGetTime();
 	if (now < next_state_log) {
@@ -407,6 +410,7 @@ SaturnDebugGameState(void)
 	         (unsigned int)vg_saturn_input_held(0),
 	         (unsigned int)vg_saturn_input_pressed(0));
 	vg_saturn_debug_puts(buffer);
+#endif
 }
 
 

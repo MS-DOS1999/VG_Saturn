@@ -60,6 +60,10 @@ void Draw_BGDX(int temp1, int temp2, bool alpha_pass, bool is_debug)
 }
 #endif
 
+#ifdef SATURN
+#include "saturn_profile.h"
+#endif
+
 void Draw_Lines()
 { 
 
@@ -1375,10 +1379,13 @@ void Draw_Hud_Sprites()
         
         for ( int i=0;i < hud_no_sprites;i++)
 		if(i >= 0 && i < 75)
-		if(var4[i] >= 0 && var4[i] < TOTAL_NO_HUD)
+        if(var4[i] >= 0 && var4[i] < TOTAL_NO_HUD)
         if(var4[i] != 1) // Don't draw the mouse pointer or message box
         if(hud[var4[i]].alpha != 0.0f || mode)
         { 
+#ifdef SATURN
+            VG_SATURN_PROFILE_COUNT_HUD_SPRITE();
+#endif
 			// Run bump this code..
             if(hud[var4[i]].bump_this == true)  
             {

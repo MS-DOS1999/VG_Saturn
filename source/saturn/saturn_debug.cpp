@@ -1,3 +1,4 @@
+#define VG_SATURN_DEBUG_IMPLEMENTATION
 #include "saturn_debug.h"
 
 #include <stddef.h>
@@ -9,6 +10,7 @@
 static void
 midi_putc(char c)
 {
+#if VG_SATURN_DEBUG_LOG
     uint32_t timeout = 100000;
     while ((SCSP_MIDI_STATUS & SCSP_MIDI_MOFULL) != 0) {
         if (--timeout == 0) {
@@ -16,6 +18,9 @@ midi_putc(char c)
         }
     }
     SCSP_MIDI_OUT = (uint16_t)(uint8_t)c;
+#else
+    (void)c;
+#endif
 }
 
 static char *
@@ -84,12 +89,15 @@ append_u64(char *dst, char *end, uint64_t value)
 extern "C" void
 vg_saturn_debug_init(void)
 {
+#if VG_SATURN_DEBUG_LOG
     vg_saturn_debug_puts("[BOOT] saturn_debug_init\n");
+#endif
 }
 
 extern "C" void
 vg_saturn_debug_puts(const char *text)
 {
+#if VG_SATURN_DEBUG_LOG
     if (text == NULL) {
         return;
     }
@@ -99,11 +107,15 @@ vg_saturn_debug_puts(const char *text)
         }
         midi_putc(*text++);
     }
+#else
+    (void)text;
+#endif
 }
 
 extern "C" void
 vg_saturn_debug_stage(uint32_t id, const char *name)
 {
+#if VG_SATURN_DEBUG_LOG
     char buffer[128];
     char *out = buffer;
     char *end = buffer + sizeof(buffer) - 1;
@@ -115,6 +127,10 @@ vg_saturn_debug_stage(uint32_t id, const char *name)
     out = append_char(out, end, '\n');
     *out = '\0';
     vg_saturn_debug_puts(buffer);
+#else
+    (void)id;
+    (void)name;
+#endif
 }
 
 extern "C" void
@@ -131,6 +147,7 @@ vg_saturn_debug_vdp1_detail(uint64_t frame,
                             uint32_t sample_sw,
                             uint32_t sample_sh)
 {
+#if VG_SATURN_DEBUG_LOG
     char buffer[224];
     char *out = buffer;
     char *end = buffer + sizeof(buffer) - 1;
@@ -162,6 +179,20 @@ vg_saturn_debug_vdp1_detail(uint64_t frame,
     out = append_char(out, end, '\n');
     *out = '\0';
     vg_saturn_debug_puts(buffer);
+#else
+    (void)frame;
+    (void)skip_alpha;
+    (void)skip_texture;
+    (void)skip_bounds;
+    (void)skip_upload;
+    (void)skip_cmdt;
+    (void)sample_x;
+    (void)sample_y;
+    (void)sample_w;
+    (void)sample_h;
+    (void)sample_sw;
+    (void)sample_sh;
+#endif
 }
 
 extern "C" void
@@ -173,6 +204,7 @@ vg_saturn_debug_vdp1_regs(uint64_t frame,
                           uint32_t tvmr,
                           uint32_t ptmr)
 {
+#if VG_SATURN_DEBUG_LOG
     char buffer[192];
     char *out = buffer;
     char *end = buffer + sizeof(buffer) - 1;
@@ -194,6 +226,15 @@ vg_saturn_debug_vdp1_regs(uint64_t frame,
     out = append_char(out, end, '\n');
     *out = '\0';
     vg_saturn_debug_puts(buffer);
+#else
+    (void)frame;
+    (void)edsr;
+    (void)lopr;
+    (void)copr;
+    (void)modr;
+    (void)tvmr;
+    (void)ptmr;
+#endif
 }
 
 extern "C" void
@@ -206,6 +247,7 @@ vg_saturn_debug_vdp2_regs(uint64_t frame,
                           uint32_t prisc,
                           uint32_t prisd)
 {
+#if VG_SATURN_DEBUG_LOG
     char buffer[224];
     char *out = buffer;
     char *end = buffer + sizeof(buffer) - 1;
@@ -229,11 +271,22 @@ vg_saturn_debug_vdp2_regs(uint64_t frame,
     out = append_char(out, end, '\n');
     *out = '\0';
     vg_saturn_debug_puts(buffer);
+#else
+    (void)frame;
+    (void)tvmd;
+    (void)bgon;
+    (void)spctl;
+    (void)prisa;
+    (void)prisb;
+    (void)prisc;
+    (void)prisd;
+#endif
 }
 
 extern "C" void
 vg_saturn_debug_pass(const char *name)
 {
+#if VG_SATURN_DEBUG_LOG
     char buffer[128];
     char *out = buffer;
     char *end = buffer + sizeof(buffer) - 1;
@@ -243,12 +296,16 @@ vg_saturn_debug_pass(const char *name)
     out = append_char(out, end, '\n');
     *out = '\0';
     vg_saturn_debug_puts(buffer);
+#else
+    (void)name;
+#endif
 }
 
 extern "C" void
 vg_saturn_debug_frame(uint64_t frame, uint32_t cmdts, uint32_t uploads,
                       uint32_t upload_bytes, uint32_t cache_slots)
 {
+#if VG_SATURN_DEBUG_LOG
     char buffer[160];
     char *out = buffer;
     char *end = buffer + sizeof(buffer) - 1;
@@ -266,6 +323,13 @@ vg_saturn_debug_frame(uint64_t frame, uint32_t cmdts, uint32_t uploads,
     out = append_char(out, end, '\n');
     *out = '\0';
     vg_saturn_debug_puts(buffer);
+#else
+    (void)frame;
+    (void)cmdts;
+    (void)uploads;
+    (void)upload_bytes;
+    (void)cache_slots;
+#endif
 }
 
 extern "C" void
@@ -273,6 +337,7 @@ vg_saturn_debug_vdp1(uint64_t frame, uint32_t quads_in, uint32_t quads_drawn,
                      uint32_t quads_skipped, uint32_t quads_scaled,
                      uint32_t quads_distorted)
 {
+#if VG_SATURN_DEBUG_LOG
     char buffer[192];
     char *out = buffer;
     char *end = buffer + sizeof(buffer) - 1;
@@ -292,4 +357,12 @@ vg_saturn_debug_vdp1(uint64_t frame, uint32_t quads_in, uint32_t quads_drawn,
     out = append_char(out, end, '\n');
     *out = '\0';
     vg_saturn_debug_puts(buffer);
+#else
+    (void)frame;
+    (void)quads_in;
+    (void)quads_drawn;
+    (void)quads_skipped;
+    (void)quads_scaled;
+    (void)quads_distorted;
+#endif
 }
